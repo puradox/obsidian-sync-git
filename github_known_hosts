@@ -1,0 +1,7 @@
+# Pinned GitHub SSH host key (Ed25519).
+# Fingerprint: SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU
+# GITHUB_SSH_COMMAND forces HostKeyAlgorithms=ssh-ed25519, so only this key is
+# ever used. To verify/refresh, compare against https://api.github.com/meta
+# ("ssh_keys") or GitHub's published SSH key fingerprints doc, then run:
+#   ssh-keyscan -t ed25519 github.com
+github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl

@@ -1,0 +1,27 @@
+# .gitignore installed into the vault working tree by the bridge entrypoint
+# (only if the vault does not already have one). The bridge container is the
+# ONLY writer to this working tree.
+
+# Obsidian per-device UI state — changes on every pane focus / cursor move.
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+.obsidian/workspace*
+
+# obsidian-headless writes a transient lock DIRECTORY here during `ob sync`.
+# It self-heals (stale after 5s) but must never be committed.
+.obsidian/.sync.lock
+
+# obsidian-headless case-sensitivity probe. Normally created and unlinked
+# within a single sync; ignored in case a crash leaves it behind.
+.OBSIDIANTEST
+.obsidiantest
+
+# Obsidian trash
+.trash/
+
+# The obsidian-headless sync state (state.db, sync.log, auth_token) lives in
+# $XDG_CONFIG_HOME/obsidian-headless (the /config volume), NOT in the vault —
+# so there is nothing to ignore for it here. This comment documents that fact.
+
+# Uncomment if the on-disk cache causes noisy diffs for you:
+# .obsidian/cache
