@@ -1,0 +1,37 @@
+name: CI
+
+# Keep releases from breaking: lint the scripts and confirm the image builds.
+# Runs on PRs and pushes to main. Never pushes an image.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ShellCheck scripts
+        run: shellcheck -S style scripts/*.sh   # shellcheck is preinstalled on ubuntu-latest
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (amd64, no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=ci
+          cache-to: type=gha,mode=max,scope=ci

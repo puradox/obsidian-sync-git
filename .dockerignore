@@ -1,0 +1,11 @@
+.git
+.github
+.gitignore
+.context
+.env
+bridge.env
+secrets/
+deploy_key
+deploy_key.pub
+*.pem
+*.md

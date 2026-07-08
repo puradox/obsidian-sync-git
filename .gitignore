@@ -1,0 +1,10 @@
+# Local config & secrets — never commit these.
+.env
+bridge.env
+/secrets/
+deploy_key
+deploy_key.pub
+*.pem
+
+# local bridge test runs
+/test/
