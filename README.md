@@ -5,6 +5,13 @@
   </picture>
 </p>
 
+<p align="center">
+  <a href="https://github.com/puradox/obsidian-sync-git/actions/workflows/ci.yml"><img src="https://github.com/puradox/obsidian-sync-git/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/puradox/obsidian-sync-git/releases/latest"><img src="https://img.shields.io/github/v/release/puradox/obsidian-sync-git?label=release" alt="Latest release"></a>
+  <a href="https://github.com/puradox/obsidian-sync-git/pkgs/container/obsidian-sync-git"><img src="https://img.shields.io/badge/ghcr.io-obsidian--sync--git-2496ED?logo=docker&logoColor=white" alt="Container image on GHCR"></a>
+  <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0"></a>
+</p>
+
 **Automatically keep a full, versioned copy of your Obsidian vault in a GitHub
 repository.**
 
@@ -371,3 +378,18 @@ Watch what's happening with `docker compose logs -f`;
 | `dubious ownership in repository` | Only with bind mounts: `chown -R 1000:1000` the folder (the bridge runs as user 1000). Named volumes (the default) are unaffected. |
 | Repeated `ALERT: rebase conflict` in the logs | A merged pull request clashes with a note edit — see [How syncing works](#how-syncing-works). On the very first sync, it means the repository wasn't empty. |
 | Container shows as `unhealthy` | No sync succeeded recently — check `docker compose logs` for the error. |
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or
+  <http://opensource.org/licenses/MIT>)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in this project by you, as defined in the Apache-2.0 license,
+shall be dual licensed as above, without any additional terms or conditions.
