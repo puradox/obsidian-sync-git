@@ -1,23 +1,63 @@
-name: Publish container image
+name: Release
 
-# Build a multi-arch image and push it to GitHub Container Registry (GHCR) on
-# every published release. Also runnable manually (publishes a short-sha tag).
+# Cut a release by pushing a semver tag:
+#
+#   git tag v1.2.3 && git push origin v1.2.3
+#
+# That single tag push drives everything below — no manual GitHub UI step:
+#   1. github-release  — creates the GitHub Release with auto-generated notes.
+#   2. build-and-push  — builds the multi-arch image and pushes it to GHCR.
+#
+# The tag is the single source of truth. (We deliberately do NOT trigger off
+# `release: published`: a Release created here by the built-in GITHUB_TOKEN
+# would not chain into another workflow anyway, so keying both jobs off the tag
+# push is simpler and avoids a double build.)
 on:
-  release:
-    types: [published]
-  workflow_dispatch:
-
-permissions:
-  contents: read
-  packages: write   # push to ghcr.io
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:   # manual run from a branch: publishes a short-sha image only
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}   # puradox/obsidian-sync-git
 
 jobs:
+  # Turn the pushed tag into a published GitHub Release. Notes are generated
+  # from the merged PRs / commits since the previous release.
+  github-release:
+    if: github.ref_type == 'tag'   # nothing to release on a manual branch dispatch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create releases
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          # Idempotent: re-running the workflow for an existing tag is a no-op.
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $tag already exists — skipping."
+            exit 0
+          fi
+          # A pre-release semver tag has a suffix after a hyphen (e.g. v1.2.3-rc.1).
+          prerelease=""
+          case "$tag" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+            --title "$tag" \
+            --generate-notes \
+            --verify-tag \
+            $prerelease
+
   build-and-push:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # push to ghcr.io
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,8 +77,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Derive tags + OCI labels. On a full (non-prerelease) release a semver tag
-      # like v1.2.3 yields 1.2.3 / 1.2 / 1 / latest; a prerelease skips `latest`.
+      # Derive tags + OCI labels. A semver tag like v1.2.3 yields 1.2.3 / 1.2 / 1
+      # plus `latest`; a prerelease tag (v1.2.3-rc.1) skips `latest`. A manual
+      # workflow_dispatch from a branch has no semver, so only sha-<short> applies.
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -48,7 +89,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
             type=sha,format=short
 
       - name: Build and push (linux/amd64, linux/arm64)
