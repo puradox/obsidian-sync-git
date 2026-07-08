@@ -426,21 +426,30 @@ token from the env var (the CLI checks the env var before any token file).
 ## Container images
 
 Multi-arch images (`linux/amd64`, `linux/arm64`) are published to **GitHub
-Container Registry** on every published GitHub release, by
-[`.github/workflows/release.yml`](../.github/workflows/release.yml):
+Container Registry** whenever a semver tag is pushed, by
+[`.github/workflows/release.yml`](../.github/workflows/release.yml). The same
+workflow first creates the GitHub Release (with auto-generated notes) from that
+tag — pushing the tag is the only step:
+
+```bash
+git tag v1.2.3 && git push origin v1.2.3
+```
+
+Image reference:
 
 ```
 ghcr.io/puradox/obsidian-sync-git
 ```
 
-Tags from a semver release (e.g. tag `v1.2.3`): `1.2.3` / `1.2` / `1`, plus
-`latest` (newest non-prerelease) and `sha-<short>`.
+Image tags from a semver tag `v1.2.3`: `1.2.3` / `1.2` / `1`, plus
+`latest` (newest non-prerelease) and `sha-<short>`. A prerelease tag
+(`v1.2.3-rc.1`) marks the Release as a prerelease and skips `latest`.
 
 ```bash
 docker pull ghcr.io/puradox/obsidian-sync-git:latest      # or :1.2.3 to pin
 ```
 
-- **The first release** creates the GHCR package as **private**. To allow
+- **The first tag** creates the GHCR package as **private**. To allow
   unauthenticated `docker pull`, make it public in the package's GitHub
   settings (or `docker login ghcr.io` with a PAT that has `read:packages`).
 - Each image carries SLSA build provenance + an SBOM (the extra
@@ -513,7 +522,7 @@ Dockerfile                  node:22-slim + git + obsidian-headless + supercronic
 .env.example                env-file template (docker run --env-file)
 github_known_hosts          pinned github.com Ed25519 host key
 docs/REFERENCE.md           this file
-.github/workflows/          release.yml (build+push to GHCR on release) + ci.yml (lint+build)
+.github/workflows/          release.yml (create Release + build+push to GHCR on tag) + ci.yml (lint+build)
 scripts/entrypoint.sh       resolve config, ssh/git/sync setup, launch supercronic
 scripts/bridge.sh           one bridge cycle (flock-guarded)
 scripts/commit-message.sh   AI (or fallback) commit message
