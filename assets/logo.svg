@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8b5cf6"/>
+      <stop offset="1" stop-color="#4c1d95"/>
+    </linearGradient>
+  </defs>
+  <!-- gem silhouette -->
+  <path d="M48 88 L96 52 L160 52 L208 88 L128 204 Z" fill="url(#g1)"
+        stroke="#4c1d95" stroke-width="5" stroke-linejoin="round"/>
+  <!-- facet lines double as git-graph edges -->
+  <g stroke="#ddd6fe" stroke-width="5" stroke-linecap="round" fill="none">
+    <path d="M48 88 L208 88"/>
+    <path d="M96 52 L128 88 L160 52"/>
+    <path d="M128 88 L128 204"/>
+  </g>
+  <!-- commit nodes at the facet vertices -->
+  <g fill="#ffffff" stroke="#4c1d95" stroke-width="4">
+    <circle cx="96" cy="52" r="8"/>
+    <circle cx="160" cy="52" r="8"/>
+    <circle cx="48" cy="88" r="8"/>
+    <circle cx="208" cy="88" r="8"/>
+    <circle cx="128" cy="88" r="9.5"/>
+    <circle cx="128" cy="204" r="8"/>
+  </g>
+</svg>
