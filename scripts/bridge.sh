@@ -89,7 +89,7 @@ rebase_onto_main() {
   git rebase origin/main && return 0
   if [ -n "$(git ls-files -u)" ] || rebase_in_progress; then
     if abort_rebase_clean; then
-      alertlog "rebase conflict${ctx:+ on $ctx} pulling origin/main. vault-wins: rebase aborted, repo left clean, skill changes NOT applied and NOT pushed. A merged skill PR that conflicts with a vault edit must be rebased onto the current vault and re-merged (or closed) upstream. On a FIRST cycle this instead means main's existing history doesn't match the vault — see the bootstrap note in docs/REFERENCE.md."
+      alertlog "rebase conflict${ctx:+ on $ctx} pulling origin/main. vault-wins: rebase aborted, repo left clean, skill changes NOT applied and NOT pushed. A merged skill PR that conflicts with a vault edit must be rebased onto the current vault and re-merged (or closed) upstream. On a FIRST cycle this instead means main's existing history doesn't match the vault — see 'The first sync' in the README."
     else
       alertlog "rebase conflict${ctx:+ on $ctx} AND the abort failed — repo may be left mid-rebase; run 'git rebase --abort' in the vault volume."
     fi
