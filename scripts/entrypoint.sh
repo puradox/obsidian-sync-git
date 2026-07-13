@@ -167,7 +167,10 @@ setup_sync() {
 }
 
 write_crontab() {
-  printf '%s /usr/local/bin/bridge.sh\n' "$CRON_SCHEDULE" > "$CRONTAB_FILE"
+  # Cap every scheduled cycle (not just the RUN_ON_START one) so a hung step can
+  # never wedge the schedule. --kill-after force-kills a cycle that ignores TERM.
+  printf '%s timeout --kill-after=30 %s /usr/local/bin/bridge.sh\n' \
+    "$CRON_SCHEDULE" "$BRIDGE_CYCLE_TIMEOUT" > "$CRONTAB_FILE"
 }
 
 # =============================== main =====================================
@@ -191,6 +194,22 @@ read -r -a cron_fields <<< "$CRON_SCHEDULE"
 [ "${#cron_fields[@]}" -eq 5 ] || die "CRON_SCHEDULE must be a standard 5-field cron expression, got: '$CRON_SCHEDULE'"
 case "${HEALTH_STALE_SECONDS:-0}" in
   *[!0-9]*) die "HEALTH_STALE_SECONDS must be an integer number of seconds, got: '$HEALTH_STALE_SECONDS'" ;;
+esac
+
+# Bound the sync engine and the cycle. obsidian-headless puts no client-side
+# timeout on its sync-server connection, so a stalled sync would otherwise hang a
+# cycle forever (and, via the inherited flock fd, orphan-hold its lock). Every
+# `ob sync` runs under OB_SYNC_TIMEOUT; every cycle (initial AND scheduled) runs
+# under BRIDGE_CYCLE_TIMEOUT as an outer safety net.
+export OB_SYNC_TIMEOUT="${OB_SYNC_TIMEOUT:-300}"
+case "$OB_SYNC_TIMEOUT" in
+  ''|*[!0-9]*) die "OB_SYNC_TIMEOUT must be an integer number of seconds, got: '$OB_SYNC_TIMEOUT'" ;;
+esac
+# Derived to clear two ob syncs (pull + push) plus git/LLM work; override for very
+# large vaults, but keep it comfortably above 2x OB_SYNC_TIMEOUT.
+BRIDGE_CYCLE_TIMEOUT="${BRIDGE_CYCLE_TIMEOUT:-$(( OB_SYNC_TIMEOUT * 2 + 300 ))}"
+case "$BRIDGE_CYCLE_TIMEOUT" in
+  ''|*[!0-9]*) die "BRIDGE_CYCLE_TIMEOUT must be an integer number of seconds, got: '$BRIDGE_CYCLE_TIMEOUT'" ;;
 esac
 if [[ ! "$CRON_SCHEDULE" =~ ^\*/[0-9]+[[:space:]] ]] && [ -z "${HEALTH_STALE_SECONDS:-}" ]; then
   log "WARNING: CRON_SCHEDULE '$CRON_SCHEDULE' is not '*/N ...', so the healthcheck cannot derive a staleness threshold and falls back to 1800s — set HEALTH_STALE_SECONDS to ~2x your interval to avoid false-unhealthy"
@@ -221,8 +240,9 @@ init_git_repo
 setup_sync
 
 if [ "$RUN_ON_START" = "true" ]; then
-  log "running an initial bridge cycle (RUN_ON_START=true; 5 min cap)"
-  timeout 300 /usr/local/bin/bridge.sh || log "initial cycle did not complete cleanly; supercronic will retry on schedule"
+  log "running an initial bridge cycle (RUN_ON_START=true; ${BRIDGE_CYCLE_TIMEOUT}s cap)"
+  timeout --kill-after=30 "$BRIDGE_CYCLE_TIMEOUT" /usr/local/bin/bridge.sh \
+    || log "initial cycle did not complete cleanly; supercronic will retry on schedule"
 fi
 
 write_crontab

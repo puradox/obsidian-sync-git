@@ -99,15 +99,28 @@ rebase_onto_main() {
   return 1
 }
 
-# Run one one-shot `ob sync`. stdin from /dev/null so the CLI can never block on
-# an interactive prompt. Returns the CLI's exit code.
+# Run one one-shot `ob sync`, hard-bounded by a timeout. obsidian-headless has no
+# client-side timeout on its sync-server connection: a stalled data socket (seen
+# in the wild as a sync.log that stops at "Connecting..." right after "Starting
+# sync") hangs the CLI indefinitely. Unbounded, that one hang wedges the whole
+# cycle — and, because the flock fd would be inherited by this child, a killed
+# cycle could leave an orphaned `ob` still holding the lock. So:
+#   - timeout kills a stalled sync (SIGTERM, then SIGKILL after a grace period via
+#     --kill-after) so it can never outlive its cycle. 124 (timed out) / 137
+#     (SIGKILLed) are treated like any other failure: defer and retry next tick.
+#   - 9>&- closes the lock fd for the `ob` child, so even an `ob` that somehow
+#     lingers past its parent can never keep the cycle lock held.
+# stdin from /dev/null so the CLI can never block on an interactive prompt.
 ob_sync() {
   local phase="$1" rc
   log "ob sync ($phase)"
-  ob sync --path "$VAULT_DIR" </dev/null
+  timeout --kill-after=30 "${OB_SYNC_TIMEOUT:-300}" \
+    ob sync --path "$VAULT_DIR" </dev/null 9>&-
   rc=$?
   if [ "$rc" -ne 0 ]; then
     case "$rc" in
+      124) err "ob sync ($phase) timed out after ${OB_SYNC_TIMEOUT:-300}s (stalled sync-server connection?) — killed; deferring to next tick" ;;
+      137) err "ob sync ($phase) ignored the timeout and was SIGKILLed after the grace period — deferring to next tick" ;;
       1) err "ob sync ($phase) failed (exit 1): network error / another sync running / sync-engine error" ;;
       2) err "ob sync ($phase) failed (exit 2): encryption key missing — re-run sync-setup" ;;
       3) err "ob sync ($phase) failed (exit 3): no sync configuration for $VAULT_DIR" ;;

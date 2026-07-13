@@ -30,7 +30,7 @@ ENV HOME=/home/obsidian \
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-      git ca-certificates openssh-client curl jq bash util-linux coreutils tini; \
+      git ca-certificates openssh-client curl jq bash util-linux coreutils procps tini; \
     \
     # supercronic
     arch="$(dpkg --print-architecture)"; \
