@@ -92,9 +92,18 @@ func aiMessage() (string, error) {
 	return msg, nil
 }
 
+// gitOutput returns git's stdout, or "" on failure. A failure here is never
+// fatal — the prompt just gets less context and the fallback counts zero
+// files — but it is logged so a manual run explains itself.
 func gitOutput(args ...string) string {
 	out, err := exec.Command("git", args...).Output()
 	if err != nil {
+		msg := err.Error()
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+			msg = errSnippet(exitErr.Stderr)
+		}
+		fmt.Fprintf(os.Stderr, "commit-message: git %s failed: %s\n", strings.Join(args, " "), msg)
 		return ""
 	}
 	return string(out)
@@ -159,8 +168,12 @@ func hasHTTPScheme(base string) bool {
 
 // maxTokensFromEnv coerces a missing or malformed LLM_MAX_TOKENS to the default.
 func maxTokensFromEnv(s string) int {
+	if s == "" {
+		return defaultMaxTokens
+	}
 	n, err := strconv.Atoi(s)
 	if err != nil || n <= 0 {
+		fmt.Fprintf(os.Stderr, "commit-message: ignoring invalid LLM_MAX_TOKENS %q; using %d\n", s, defaultMaxTokens)
 		return defaultMaxTokens
 	}
 	return n
