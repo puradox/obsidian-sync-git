@@ -30,7 +30,7 @@ ENV HOME=/home/obsidian \
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-      git ca-certificates openssh-client curl jq bash util-linux coreutils tini; \
+      git ca-certificates openssh-client curl jq bash util-linux coreutils procps tini; \
     \
     # supercronic
     arch="$(dpkg --print-architecture)"; \
@@ -93,7 +93,10 @@ VOLUME ["/vault", "/config"]
 
 # Unhealthy if no bridge cycle has succeeded within the staleness threshold
 # (2x the cron interval for */N schedules, else 1800s, or HEALTH_STALE_SECONDS).
-HEALTHCHECK --interval=5m --timeout=10s --start-period=5m --retries=3 \
+# start-period must cover the RUN_ON_START initial cycle, which may run for the
+# default BRIDGE_CYCLE_TIMEOUT (900s) plus the 30s kill grace; anyone raising
+# OB_SYNC_TIMEOUT/BRIDGE_CYCLE_TIMEOUT should extend start_period in compose too.
+HEALTHCHECK --interval=5m --timeout=10s --start-period=16m --retries=3 \
   CMD ["/usr/local/bin/healthcheck.sh"]
 
 # tini reaps the git/ob child processes supercronic spawns.

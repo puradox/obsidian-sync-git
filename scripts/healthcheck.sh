@@ -28,7 +28,9 @@ else
 fi
 
 if [ ! -f "$SUCCESS_MARKER" ]; then
-  # start_period in compose covers the pre-first-cycle window.
+  # The HEALTHCHECK start-period (sized to the default BRIDGE_CYCLE_TIMEOUT plus
+  # its kill grace) covers the pre-first-cycle window; raising the timeouts
+  # requires extending start_period in compose to match.
   echo "no successful cycle yet (marker $SUCCESS_MARKER absent)"
   exit 1
 fi
