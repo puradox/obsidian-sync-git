@@ -118,7 +118,7 @@ services:
       # LLM_API_BASE: "https://api.groq.com/openai/v1"
       # LLM_MODEL: "llama-3.1-8b-instant"
       # LLM_API_KEY: "your-api-key"
-      # LLM_MAX_TOKENS: "1024"
+      # LLM_MAX_TOKENS: "4096"
 
       # AI commit messages, option B: Anthropic (used only if option A is unset).
       # ANTHROPIC_API_KEY: "your-api-key"
@@ -202,7 +202,7 @@ Everything is configured in `docker-compose.yml` (step 4).
 | `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` | | `Obsidian Bridge` / `obsidian-bridge@localhost` | Name and email shown on the commits. |
 | `VAULT_SUBDIR` | | — (vault = repo root) | Keep the vault in a subfolder of the repository ([details](#keeping-the-vault-in-a-subfolder-of-the-repo)). Fixed once the bridge has run. |
 | `LLM_API_BASE` / `LLM_MODEL` / `LLM_API_KEY` | | — | AI commit messages via an OpenAI-compatible provider ([details](#ai-commit-messages)). |
-| `LLM_MAX_TOKENS` | | `1024` | Response limit for that provider. |
+| `LLM_MAX_TOKENS` | | `4096` | Completion budget for that provider. On reasoning models this also covers the hidden "thinking" tokens — raise it if commits fall back to the plain label. |
 | `ANTHROPIC_API_KEY` | | — | AI commit messages via Anthropic instead ([details](#ai-commit-messages)). |
 | `ANTHROPIC_MODEL` | | `claude-haiku-4-5` | Model for the Anthropic option. |
 | `HEALTH_STALE_SECONDS` | | 2× the sync interval | Seconds without a successful sync before Docker reports `unhealthy`. Set it (≈2× your interval) if `CRON_SCHEDULE` isn't every-N-minutes. |
@@ -300,6 +300,10 @@ Good to know:
   summaries, run a local Ollama — the diff never leaves your machine.
 - **It can never break a sync.** If the provider is down, slow, or
   misconfigured, the bridge just falls back to the plain label.
+- **Reasoning models** (gpt-oss, DeepSeek-R1, …) spend part of
+  `LLM_MAX_TOKENS` on hidden "thinking" tokens before the message itself. If
+  commits come out as the plain label while your provider dashboard shows
+  token use, raise `LLM_MAX_TOKENS` (or pick a non-reasoning model).
 - `LLM_API_BASE` must start with `http://` or `https://`.
 
 ## Keeping the vault in a subfolder of the repo

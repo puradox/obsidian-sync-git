@@ -155,7 +155,7 @@ if [ -n "$(git status --porcelain)" ]; then
     err "git add failed"
     exit 1
   fi
-  msg="$(commit-message.sh 2>/dev/null || true)"
+  msg="$(commit-message 2>/dev/null || true)"
   [ -n "$msg" ] || msg="vault auto-commit ($(ts))"
   if ! git commit -q -m "$msg"; then
     err "git commit failed"
