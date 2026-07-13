@@ -133,7 +133,8 @@ services:
 
       # Kill a single sync that stalls this long (seconds) and retry next tick —
       # guards against the sync engine hanging on a half-open connection. Raise
-      # only for very large vaults.
+      # only for very large vaults — and then also extend the healthcheck
+      # start_period so a long first sync isn't flagged unhealthy.
       # OB_SYNC_TIMEOUT: "300"
 
       # Only if your vault uses a non-default config folder.
@@ -207,7 +208,7 @@ Everything is configured in `docker-compose.yml` (step 4).
 | `HEALTH_STALE_SECONDS` | | 2× the sync interval | Seconds without a successful sync before Docker reports `unhealthy`. Set it (≈2× your interval) if `CRON_SCHEDULE` isn't every-N-minutes. |
 | `RUN_ON_START` | | `true` | Sync once immediately when the container starts. |
 | `OB_SYNC_TIMEOUT` | | `300` | Seconds a single `ob sync` may run before it's killed and retried next tick. Guards against the sync engine stalling on a half-open connection. Raise it only for very large vaults. |
-| `BRIDGE_CYCLE_TIMEOUT` | | `2×OB_SYNC_TIMEOUT + 300` | Outer cap, in seconds, on a whole sync cycle. Safety net above `OB_SYNC_TIMEOUT`; keep it comfortably larger. |
+| `BRIDGE_CYCLE_TIMEOUT` | | `2×OB_SYNC_TIMEOUT + 300` | Outer cap, in seconds, on a whole sync cycle. Safety net above `OB_SYNC_TIMEOUT`; keep it comfortably larger. If you raise either timeout, also extend the healthcheck `start_period` (16m by default) in compose so a long first sync isn't flagged unhealthy. |
 | `OBSIDIAN_CONFIG_DIR` | | `.obsidian` | Only if your vault uses a different config folder. |
 | `OBSIDIAN_DEVICE_NAME` | | — | Device name shown in Obsidian Sync's version history. |
 
