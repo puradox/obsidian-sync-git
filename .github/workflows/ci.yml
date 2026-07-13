@@ -1,7 +1,8 @@
 name: CI
 
-# Keep releases from breaking: lint the scripts and confirm the image builds.
-# Runs on PRs and pushes to main. Never pushes an image.
+# Keep releases from breaking: lint the scripts, check the Go code, and
+# confirm the image builds. Runs on PRs and pushes to main. Never pushes an
+# image.
 on:
   push:
     branches: [main]
@@ -18,6 +19,24 @@ jobs:
 
       - name: ShellCheck scripts
         run: shellcheck -S style scripts/*.sh   # shellcheck is preinstalled on ubuntu-latest
+
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
 
   build:
     runs-on: ubuntu-latest

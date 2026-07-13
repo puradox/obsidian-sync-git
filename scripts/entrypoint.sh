@@ -13,7 +13,7 @@ export REPO_DIR="${REPO_DIR:-/vault}"
 # persists on the config volume and NEVER lands in the vault.
 export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-/config}"
 export CRON_SCHEDULE="${CRON_SCHEDULE:-*/15 * * * *}"
-# ANTHROPIC_MODEL is not consumed here — it flows from compose to commit-message.sh
+# ANTHROPIC_MODEL is not consumed here — it flows from compose to commit-message
 # (which defaults it), so entrypoint doesn't re-plumb it. SUCCESS_MARKER is a
 # Dockerfile ENV (the healthcheck must see it too, and HEALTHCHECK never sees
 # entrypoint exports).
