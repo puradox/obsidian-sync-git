@@ -67,6 +67,12 @@ setup_ssh() {
   # Pinned host key (ed25519 only), no passwords, no prompts. Connect/keepalive
   # timeouts so a blackholed connection can't hang a cycle (and its flock) forever.
   export GIT_SSH_COMMAND="ssh -i $dest -o IdentitiesOnly=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o PasswordAuthentication=no -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=30 -o ServerAliveCountMax=6"
+  # Also persist it in git config: the bridge reaches the key via the export
+  # above, but a `docker exec` shell inherits none of the entrypoint's exports,
+  # so `git fetch/push` there would fall back to keyless ssh and be denied.
+  # core.sshCommand makes any git in the repo use the deploy key for manual
+  # recovery. (The export still wins for the bridge; both point at the same key.)
+  git config --global core.sshCommand "$GIT_SSH_COMMAND"
   log "ssh configured (pinned github.com ed25519 host key)"
 }
 

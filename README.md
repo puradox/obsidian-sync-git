@@ -181,8 +181,8 @@ stop watching). Open your GitHub repository — your notes are there.
 - **One rule:** only the bridge may write to its `vault` volume. Make changes
   in Obsidian, or on GitHub via pull requests — nowhere else.
 - **Conflicts are safe.** If a merged pull request clashes with a note you
-  edited, your vault wins, nothing is lost, and the logs alert you until the
-  pull request is fixed. Details: [How syncing works](#how-syncing-works).
+  edited, your vault wins automatically, sync keeps going, nothing is lost, and
+  the logs alert you. Details: [How syncing works](#how-syncing-works).
 - **Changing a setting:** edit `docker-compose.yml`, then run
   `docker compose up -d` again.
 - **Updating:** `docker compose pull && docker compose up -d`.
@@ -361,19 +361,23 @@ Every 15 minutes (or your `CRON_SCHEDULE`) the bridge runs one cycle:
 Two rules keep this safe:
 
 - **Your vault always wins.** Edits made in Obsidian take priority over
-  anything merged on GitHub.
-- **Conflicts are never resolved automatically.** If a merged pull request
-  clashes with a note you edited, the bridge sets the pull request's changes
-  aside, keeps your vault exactly as it is, and prints an `ALERT` in the logs
-  (the container also shows as `unhealthy`). Fix it on GitHub — update or
-  close the conflicting pull request — and the next cycle carries on by
-  itself.
+  anything merged on GitHub — including when they conflict.
+- **Conflicts resolve automatically, in your vault's favour.** If a merged pull
+  request clashes with a note you edited, the bridge keeps your note's version
+  of the conflicting lines, still merges in every non-conflicting change from
+  the pull request, pushes the result, and prints an `ALERT` naming the files so
+  you can see what happened. The pull request's overridden version stays in the
+  repository's history, so nothing is lost — re-apply it with a fresh pull
+  request if you actually wanted it. Sync never halts waiting for you. (The rare
+  conflict that can't be resolved even in your favour — e.g. a note you edited
+  was deleted on GitHub — still stops and alerts for you to sort out upstream.)
 
 **The first sync.** If the GitHub repository is empty, the first cycle fills
 it from your vault. If your *vault* is empty and the repository already has
 notes, the bridge adopts the repository and syncs it out to your devices. If
-**both** sides already have content, the first sync will conflict — start
-with an empty repository.
+**both** sides already have content, they're merged with your vault winning any
+clash (and an `ALERT` logged) — so still start from an empty repository unless
+you specifically want your vault to override the repository's notes.
 
 ## Troubleshooting
 
@@ -387,8 +391,10 @@ Watch what's happening with `docker compose logs -f`;
 | Startup error about end-to-end encryption or a rejected password | Set `OBSIDIAN_VAULT_PASSWORD` to your vault's correct encryption password. |
 | Startup error *"No SSH deploy key provided"* | The key isn't mounted — check the `./deploy_key:/keys/deploy_key:ro` line and `GIT_DEPLOY_KEY_FILE`. |
 | `Permission denied (publickey)` when pushing | The deploy key wasn't added to the repository, or **Allow write access** wasn't ticked. |
+| `Permission denied (publickey)` running `git` yourself in `docker compose exec` | The deploy key is now wired into the repo's git config, so plain `git -C /vault fetch`/`push` works. On an older image, first run `export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/id_deploy -o IdentitiesOnly=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts"` in the shell. |
 | `dubious ownership in repository` | Only with bind mounts: `chown -R 1000:1000` the folder (the bridge runs as user 1000). Named volumes (the default) are unaffected. |
-| Repeated `ALERT: rebase conflict` in the logs | A merged pull request clashes with a note edit — see [How syncing works](#how-syncing-works). On the very first sync, it means the repository wasn't empty. |
+| `ALERT: rebase conflict … auto-resolved in favour of the vault` | Normal and handled — a merged pull request clashed with a note edit, so your note won and sync carried on; the PR's version is still in git history. See [How syncing works](#how-syncing-works). |
+| `ALERT: rebase conflict … could NOT be auto-resolved` (or it repeats every cycle) | A structural conflict the bridge won't auto-resolve (e.g. modify-vs-delete), or — on the very first sync — the repository wasn't empty. Resolve it on GitHub. |
 | Container shows as `unhealthy` | No sync succeeded recently — check `docker compose logs` for the error. |
 
 ## License

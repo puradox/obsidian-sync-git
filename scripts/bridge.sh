@@ -6,14 +6,19 @@
 # a slow cycle can never overlap the next scheduled tick (they just skip).
 #
 # Policy: the vault working tree is authoritative ("vault wins"). Skill/automation
-# changes only ever arrive as merged PRs on origin/main. We NEVER auto-resolve a
-# conflict — on a rebase conflict we abort, leave the repo clean, and alert; the
-# stale skill PR must be rebased/closed upstream.
+# changes only ever arrive as merged PRs on origin/main. On a rebase conflict we
+# resolve IN FAVOUR OF THE VAULT (git rebase -X theirs) so a conflicting skill
+# edit can never halt sync: the vault's version of the conflicting lines is kept,
+# every non-conflicting skill change still merges in, the result is pushed, and
+# we alert so you can re-apply an overridden skill change upstream if you wanted
+# it (its version stays in origin/main's history — nothing is lost). Only a
+# conflict that even a vault-wins replay can't apply (e.g. modify-vs-delete)
+# falls back to abort-and-alert.
 #
 # Exit code of THIS script (surfaced by supercronic in `docker logs`):
-#   0  cycle completed (or a harmless overlap skip)
+#   0  cycle completed (incl. a conflict auto-resolved in favour of the vault)
 #   1  recoverable failure (network / sync engine) — will retry next tick
-#   2  rebase conflict — vault-wins alert; needs upstream action
+#   2  a conflict that couldn't be auto-resolved even for the vault — upstream action
 set -uo pipefail
 
 REPO_DIR="${REPO_DIR:-/vault}"          # git repo working tree (all git commands)
@@ -80,23 +85,55 @@ fetch_main() {
   return 1
 }
 
-# Rebase onto origin/main, distinguishing a real content conflict (alert,
-# return 2 — vault-wins, needs upstream action) from any other rebase failure
-# (return 1 — retry next tick). $1 labels log messages.
+# Integrate merged skill PRs by rebasing our vault commits onto origin/main.
+#
+# vault-wins & self-healing: a conflict-free rebase keeps every side's changes.
+# On a CONFLICT we replay resolving in favour of the vault — `-X theirs` keeps
+# the commits being replayed (in a rebase "ours" is origin/main and "theirs" is
+# our vault commit), so a conflicting skill edit is overridden by your note
+# instead of halting the bridge; non-conflicting skill hunks still merge in and
+# the skill's overridden version remains in origin/main's history. We alert so
+# it's visible. Only a conflict that even a vault-wins replay can't apply
+# (e.g. modify-vs-delete) aborts and alerts for upstream action.
+#
+# Returns: 0 integrated (silently, or a conflict auto-resolved for the vault —
+# alerted); 1 a non-conflict rebase failure (retry next tick); 2 a conflict that
+# can't be auto-resolved even for the vault (abort + alert). $1 labels messages.
 rebase_onto_main() {
-  local ctx="$1"
+  local ctx="$1" conflicted_files
   remote_main_present || return 0
+
+  # Fast path: a conflict-free rebase integrates both sides untouched.
   git rebase origin/main && return 0
-  if [ -n "$(git ls-files -u)" ] || rebase_in_progress; then
-    if abort_rebase_clean; then
-      alertlog "rebase conflict${ctx:+ on $ctx} pulling origin/main. vault-wins: rebase aborted, repo left clean, skill changes NOT applied and NOT pushed. A merged skill PR that conflicts with a vault edit must be rebased onto the current vault and re-merged (or closed) upstream. On a FIRST cycle this instead means main's existing history doesn't match the vault — see 'The first sync' in the README."
-    else
-      alertlog "rebase conflict${ctx:+ on $ctx} AND the abort failed — repo may be left mid-rebase; run 'git rebase --abort' in the vault volume."
-    fi
+
+  # The rebase failed. With the (default) merge backend a genuine conflict always
+  # leaves unmerged index entries; anything else (a rebase that never started, a
+  # transient error) is not a conflict — leave the repo clean and retry.
+  conflicted_files="$(git diff --name-only --diff-filter=U 2>/dev/null | tr '\n' ' ')"
+  if [ -z "$conflicted_files" ] && ! rebase_in_progress; then
+    err "git rebase origin/main failed${ctx:+ on $ctx} for a non-conflict reason — deferring to next tick"
+    return 1
+  fi
+
+  # A real conflict. Abort the failed attempt, then replay resolving in favour of
+  # the vault so sync self-heals instead of stopping.
+  if ! abort_rebase_clean; then
+    alertlog "rebase conflict${ctx:+ on $ctx} AND the abort failed — repo may be left mid-rebase; run 'git rebase --abort' in the vault volume."
     return 2
   fi
-  err "git rebase origin/main failed${ctx:+ on $ctx} for a non-conflict reason — deferring to next tick"
-  return 1
+  if git rebase -X theirs origin/main; then
+    alertlog "rebase conflict${ctx:+ on $ctx} pulling origin/main — auto-resolved in favour of the vault (vault wins), so sync continues. A merged skill change was overridden by your note in: ${conflicted_files:-<unknown>}. The skill's version is still in origin/main's history; re-apply it via a fresh PR if you wanted it. On a FIRST cycle a conflict here instead means main's existing history doesn't match the vault — see 'The first sync' in the README."
+    return 0
+  fi
+
+  # Even a vault-wins replay couldn't apply (e.g. a note edited here but deleted
+  # on main): don't leave a half-done rebase — abort clean and alert.
+  if abort_rebase_clean; then
+    alertlog "rebase conflict${ctx:+ on $ctx} that could NOT be auto-resolved even in favour of the vault (e.g. a file modified on one side and deleted on the other). Repo left clean, nothing pushed; resolve it upstream. On a FIRST cycle see 'The first sync' in the README."
+  else
+    alertlog "rebase conflict${ctx:+ on $ctx} AND the abort failed — repo may be left mid-rebase; run 'git rebase --abort' in the vault volume."
+  fi
+  return 2
 }
 
 # Run one one-shot `ob sync`, hard-bounded by a timeout. obsidian-headless has no
