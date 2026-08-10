@@ -17,6 +17,10 @@ repository.**
 
 ```
  your devices  ⇄  Obsidian Sync  ⇄  [ this bridge ]  ⇄  GitHub
+ ────────────     ─────────────     ───────────────     ──────
+ Obsidian on      Obsidian's        Docker, on a        your private
+ phone, laptop    servers           computer that       repo — every
+ and tablet                         stays on            version, forever
 ```
 
 A small Docker container checks [Obsidian Sync](https://obsidian.md/sync) every
@@ -180,6 +184,9 @@ stop watching). Open your GitHub repository — your notes are there.
 
 - **One rule:** only the bridge may write to its `vault` volume. Make changes
   in Obsidian, or on GitHub via pull requests — nowhere else.
+- **Clones and vaults stay separate.** If you also clone the repository to work
+  on it, never open that clone in Obsidian —
+  [why](#dont-open-a-git-clone-as-an-obsidian-vault).
 - **Conflicts are safe.** If a merged pull request clashes with a note you
   edited, your vault wins automatically, sync keeps going, nothing is lost, and
   the logs alert you. Details: [How syncing works](#how-syncing-works).
@@ -330,7 +337,9 @@ your-repo/
 - Only files inside `vault/` reach your devices; the bridge still commits and
   pushes the whole repository.
 - Work on the other folders in a separate clone of the repository — never
-  inside the bridge's volume — and merge changes through GitHub.
+  inside the bridge's volume, and never in a clone you've opened in Obsidian
+  ([why](#dont-open-a-git-clone-as-an-obsidian-vault)) — and merge changes
+  through GitHub.
 - **Decide up front:** like `VAULT_NAME`, this can't be changed once the
   bridge has run — you'd have to start over with fresh volumes.
 
@@ -379,6 +388,32 @@ notes, the bridge adopts the repository and syncs it out to your devices. If
 clash (and an `ALERT` logged) — so still start from an empty repository unless
 you specifically want your vault to override the repository's notes.
 
+### Don't open a git clone as an Obsidian vault
+
+If you clone the repository to work on it, keep that clone out of Obsidian. A
+folder that both Obsidian Sync and git write to always looks dirty: `git status`
+lists notes you never edited, and `git pull` refuses with *"Your local changes
+to the following files would be overwritten by merge."*
+
+Use two folders — a plain vault folder for Obsidian, a clone for git — and the
+problem disappears. It costs one extra copy of your notes on disk, nothing else.
+
+### Not everything in git reaches your devices
+
+Obsidian Sync carries Markdown plus common images, audio and video. Other
+extensions — `.txt`, `.json`, dotfiles like `.gitignore` — sync only when
+**"Sync all other file types"** is enabled in Obsidian's **Settings → Sync**,
+and every file has a maximum size that depends on your plan.
+
+Git has neither limit, so a file added by a pull request can sit in your
+repository and never reach a single device. The bridge can't warn you — from
+its side the sync succeeded. To list what's affected:
+
+```bash
+comm -23 <(cd ~/code/my-vault/vault && find . -type f | sort) \
+         <(cd ~/Obsidian && find . -type f | sort)
+```
+
 ## Troubleshooting
 
 Watch what's happening with `docker compose logs -f`;
@@ -396,6 +431,8 @@ Watch what's happening with `docker compose logs -f`;
 | `ALERT: rebase conflict … auto-resolved in favour of the vault` | Normal and handled — a merged pull request clashed with a note edit, so your note won and sync carried on; the PR's version is still in git history. See [How syncing works](#how-syncing-works). |
 | `ALERT: rebase conflict … could NOT be auto-resolved` (or it repeats every cycle) | A structural conflict the bridge won't auto-resolve (e.g. modify-vs-delete), or — on the very first sync — the repository wasn't empty. Resolve it on GitHub. |
 | Container shows as `unhealthy` | No sync succeeded recently — check `docker compose logs` for the error. |
+| A file is on GitHub but never appears in Obsidian | Sync doesn't carry every file type or size — see [Not everything in git reaches your devices](#not-everything-in-git-reaches-your-devices). |
+| `git pull` in your own clone says *"local changes would be overwritten"* | You've opened that clone in Obsidian, so Sync and git are both writing it — see [Don't open a git clone as an Obsidian vault](#dont-open-a-git-clone-as-an-obsidian-vault). |
 
 ## License
 
