@@ -90,6 +90,7 @@ COPY --chmod=0755 scripts/bridge.sh          /usr/local/bin/bridge.sh
 COPY --from=gobuild --chmod=0755 /out/commit-message /usr/local/bin/commit-message
 COPY --chmod=0755 scripts/healthcheck.sh     /usr/local/bin/healthcheck.sh
 COPY scripts/vault.gitignore                 /opt/bridge/vault.gitignore
+COPY scripts/submodules.sh                   /opt/bridge/submodules.sh
 COPY github_known_hosts                      /opt/bridge/github_known_hosts
 
 # Shared runtime env. Set here (not just exported by the entrypoint) so that
