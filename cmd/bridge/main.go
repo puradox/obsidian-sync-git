@@ -1,6 +1,5 @@
-// bridge runs one full Obsidian Sync <-> git bridge cycle. It is the Go port
-// of scripts/bridge.sh + scripts/submodules.sh and keeps their contract: the
-// same environment variables, the same exit codes, the same log lines.
+// bridge runs one full Obsidian Sync <-> git bridge cycle. entrypoint.sh
+// runs it once on start and then on CRON_SCHEDULE via supercronic.
 //
 // The ENTIRE cycle runs under a non-blocking flock on a container-local
 // lockfile (NOT on the /config volume — advisory locks can be unreliable on

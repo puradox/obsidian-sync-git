@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Container healthcheck: healthy iff the bridge completed a full cycle recently.
 #
-# bridge.sh writes an ISO-8601 timestamp to $SUCCESS_MARKER at the end of every
+# The bridge writes an ISO-8601 timestamp to $SUCCESS_MARKER at the end of every
 # successful cycle. We go unhealthy if that marker is older than the staleness
 # threshold, which defaults to 2x the CRON_SCHEDULE interval (per spec).
 #

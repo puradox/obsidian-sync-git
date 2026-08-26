@@ -6,8 +6,8 @@ import (
 	"time"
 )
 
-// Log lines keep bridge.sh's exact shape so `docker logs` consumers and the
-// end-to-end test see no difference between the two implementations:
+// Log line shapes (the end-to-end test greps for them; `docker logs`
+// consumers may too):
 //
 //	[bridge <ts>] message              (stdout)
 //	[bridge <ts>] !! message           (stderr; a failure to act on)

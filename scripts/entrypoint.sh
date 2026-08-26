@@ -20,10 +20,6 @@ export CRON_SCHEDULE="${CRON_SCHEDULE:-*/15 * * * *}"
 CRONTAB_FILE="${CRONTAB_FILE:-/tmp/obsidian-bridge.crontab}"
 RUN_ON_START="${RUN_ON_START:-true}"
 
-# shellcheck source-path=SCRIPTDIR
-# shellcheck source=submodules.sh
-. "$BRIDGE_LIB/submodules.sh"
-
 ts()  { date -u +%Y-%m-%dT%H:%M:%SZ; }
 log() { printf '[entrypoint %s] %s\n' "$(ts)" "$*"; }
 die() { printf '[entrypoint %s] FATAL: %s\n' "$(ts)" "$*" >&2; exit 1; }
@@ -99,7 +95,7 @@ setup_ssh() {
   # first — so the outer deploy key would win the handshake to a submodule's
   # repo and then be denied. The outer key applies to every host except the
   # per-submodule aliases (bridge-submodule-*), which the Included file maps to
-  # their own keys (written by bridge.sh from .gitmodules each cycle).
+  # their own keys (written by the bridge from .gitmodules each cycle).
   : > "$HOME/.ssh/bridge_submodules.conf"
   chmod 600 "$HOME/.ssh/bridge_submodules.conf"
   {
@@ -123,9 +119,10 @@ setup_ssh() {
 # Per-submodule deploy keys: GIT_SUBMODULE_DEPLOY_KEY_<NAME> (contents) or
 # GIT_SUBMODULE_DEPLOY_KEY_FILE_<NAME> (a mounted path), <NAME> being the
 # .gitmodules name upper-cased with every non-alphanumeric character replaced
-# by "_" (vault/Cove QMS -> VAULT_COVE_QMS; see submodules.sh). Each is
-# installed as ~/.ssh/id_submodule_<NAME>; bridge.sh routes it to the matching
-# submodule when it reads .gitmodules (which may not exist yet on first start).
+# by "_" (vault/Cove QMS -> VAULT_COVE_QMS; see cmd/bridge/submodules.go). Each
+# is installed as ~/.ssh/id_submodule_<NAME>; the bridge routes it to the
+# matching submodule when it reads .gitmodules (which may not exist yet on
+# first start).
 # A key removed from the environment is removed from disk too, so a submodule
 # can't keep pushing with a key you revoked. These keys are optional, so one
 # that is set but unusable (a typo'd mount, an empty value) is skipped with a
@@ -141,7 +138,7 @@ setup_submodule_keys() {
     else
       name="${var#GIT_SUBMODULE_DEPLOY_KEY_}"
     fi
-    dest="$(submodule_key_file "$name")"
+    dest="$HOME/.ssh/id_submodule_$name"   # the path cmd/bridge looks for
     case " ${kept[*]:-} " in *" $dest "*) continue ;; esac   # both variants set: installed once
     if ! install_key "GIT_SUBMODULE_DEPLOY_KEY_$name" "GIT_SUBMODULE_DEPLOY_KEY_FILE_$name" "$dest"; then
       log "WARNING: $var is set but unusable — skipping this submodule key; the folder still syncs to your devices and is committed locally, and each cycle will log an ALERT until it is fixed"
@@ -255,7 +252,7 @@ setup_sync() {
 write_crontab() {
   # Cap every scheduled cycle (not just the RUN_ON_START one) so a hung step can
   # never wedge the schedule. --kill-after force-kills a cycle that ignores TERM.
-  printf '%s timeout --kill-after=30 %s /usr/local/bin/bridge.sh\n' \
+  printf '%s timeout --kill-after=30 %s /usr/local/bin/bridge\n' \
     "$CRON_SCHEDULE" "$BRIDGE_CYCLE_TIMEOUT" > "$CRONTAB_FILE"
 }
 
@@ -328,7 +325,7 @@ setup_sync
 
 if [ "$RUN_ON_START" = "true" ]; then
   log "running an initial bridge cycle (RUN_ON_START=true; ${BRIDGE_CYCLE_TIMEOUT}s cap)"
-  timeout --kill-after=30 "$BRIDGE_CYCLE_TIMEOUT" /usr/local/bin/bridge.sh \
+  timeout --kill-after=30 "$BRIDGE_CYCLE_TIMEOUT" /usr/local/bin/bridge \
     || log "initial cycle did not complete cleanly; supercronic will retry on schedule"
 fi
 

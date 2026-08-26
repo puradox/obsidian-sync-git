@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: ShellCheck scripts
-        run: shellcheck -S style -x scripts/*.sh tests/*.sh   # preinstalled on ubuntu-latest; -x follows the sourced submodules.sh
+        run: shellcheck -S style scripts/*.sh tests/*.sh   # shellcheck is preinstalled on ubuntu-latest
 
   bridge-test:
     runs-on: ubuntu-latest
@@ -29,15 +29,8 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Run bridge cycles against local bare remotes (ob stubbed) — shell
-        run: tests/submodule_cycle_test.sh
-
-      # The Go port must pass the same scenarios unchanged; it is the
-      # acceptance test for replacing scripts/bridge.sh.
-      - name: Run bridge cycles against local bare remotes (ob stubbed) — Go
-        run: |
-          go build -o /tmp/bridge ./cmd/bridge
-          BRIDGE_BIN=/tmp/bridge tests/submodule_cycle_test.sh
+      - name: Run bridge cycles against local bare remotes (ob stubbed)
+        run: tests/submodule_cycle_test.sh   # builds cmd/bridge itself
 
   go:
     runs-on: ubuntu-latest
