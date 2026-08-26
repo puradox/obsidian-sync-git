@@ -5,16 +5,16 @@
 # Single scheduled process: supercronic runs the bridge script on CRON_SCHEDULE.
 # No continuous sync, no other long-running processes.
 
-# --- commit-message (Go) -----------------------------------------------------
+# --- bridge + commit-message (Go) --------------------------------------------
 # Cross-compiled on the build platform so multi-arch release builds don't run
-# the Go toolchain under QEMU emulation.
+# the Go toolchain under QEMU emulation. One static binary per cmd/ directory.
 FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS gobuild
 ARG TARGETOS TARGETARCH
 WORKDIR /src
 COPY go.mod ./
 COPY cmd ./cmd
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags='-s -w' -o /out/commit-message ./cmd/commit-message
+    go build -trimpath -ldflags='-s -w' -o /out/ ./cmd/...
 
 # --- runtime -----------------------------------------------------------------
 FROM node:22-slim
@@ -86,11 +86,10 @@ RUN set -eux; \
 
 # --- bridge scripts + static assets ----------------------------------------
 COPY --chmod=0755 scripts/entrypoint.sh      /usr/local/bin/entrypoint.sh
-COPY --chmod=0755 scripts/bridge.sh          /usr/local/bin/bridge.sh
+COPY --from=gobuild --chmod=0755 /out/bridge         /usr/local/bin/bridge
 COPY --from=gobuild --chmod=0755 /out/commit-message /usr/local/bin/commit-message
 COPY --chmod=0755 scripts/healthcheck.sh     /usr/local/bin/healthcheck.sh
 COPY scripts/vault.gitignore                 /opt/bridge/vault.gitignore
-COPY scripts/submodules.sh                   /opt/bridge/submodules.sh
 COPY github_known_hosts                      /opt/bridge/github_known_hosts
 
 # Shared runtime env. Set here (not just exported by the entrypoint) so that

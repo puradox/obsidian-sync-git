@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# End-to-end test of bridge.sh's submodule support against LOCAL bare remotes,
+# End-to-end test of the bridge's submodule support against LOCAL bare remotes,
 # with `ob` (Obsidian Sync) and `commit-message` stubbed on PATH. No network,
 # no Docker. Run from anywhere: tests/submodule_cycle_test.sh
 #
-# The bridge under test is scripts/bridge.sh by default; set BRIDGE_BIN to a
-# command (e.g. a built cmd/bridge binary) to run the same scenarios against
-# it — every implementation must pass this file unchanged.
+# The bridge under test is cmd/bridge, built into the temp dir (needs Go);
+# set BRIDGE_BIN to run the same scenarios against another build.
 #
 # Scenarios (one bridge cycle each):
 #   1. bootstrap an empty bridge from the outer remote (.gitmodules arrives)
@@ -25,9 +24,13 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPTS="$(cd "$HERE/../scripts" && pwd)"
 T="$(mktemp -d "${TMPDIR:-/tmp}/bridge-submodule-test.XXXXXX")"
 if [ -n "${KEEP_TMP:-}" ]; then echo "keeping $T"; else trap 'rm -rf "$T"' EXIT; fi
+
+if [ -z "${BRIDGE_BIN:-}" ]; then
+  (cd "$HERE/.." && go build -o "$T/bridge-bin" ./cmd/bridge)
+  BRIDGE_BIN="$T/bridge-bin"
+fi
 
 export HOME="$T/home"
 mkdir -p "$HOME/.ssh" "$T/bin"
@@ -93,7 +96,7 @@ done
 
 # --- the bridge -------------------------------------------------------------
 export REPO_DIR="$T/bridge" VAULT_DIR="$T/bridge/vault"
-export SUCCESS_MARKER="$T/last-success" BRIDGE_LOCKFILE="$T/lock" BRIDGE_LIB="$SCRIPTS"
+export SUCCESS_MARKER="$T/last-success" BRIDGE_LOCKFILE="$T/lock"
 export OB_SYNC_TIMEOUT=5
 git init -q -b main "$REPO_DIR"
 git -C "$REPO_DIR" remote add origin "$OUTER_REMOTE"
@@ -117,7 +120,7 @@ run_cycle() {
   cycles=$((cycles + 1))
   printf '\n== cycle %d: %s\n' "$cycles" "$label"
   rm -f "$SUCCESS_MARKER"; : > "$OB_LOG"
-  "${BRIDGE_BIN:-$SCRIPTS/bridge.sh}" > "$T/cycle.log" 2>&1 || rc=$?
+  "$BRIDGE_BIN" > "$T/cycle.log" 2>&1 || rc=$?
   [ -z "${KEEP_TMP:-}" ] || cp "$T/cycle.log" "$T/cycle-$cycles.log"
   if [ "$rc" -ne "$want_rc" ]; then
     fail "exit code $rc (wanted $want_rc)"; sed 's/^/    | /' "$T/cycle.log"
@@ -351,25 +354,7 @@ check "outer gitlink follows the folder's HEAD" \
   test "$(outer_ptr vault/Legacy)" = "$(git -C "$VAULT_DIR/Legacy" rev-parse HEAD)"
 check "outer tree clean after the cycle"         outer_clean
 
-# --- unit-level: the env-var name transform -----------------------------------
-# shellcheck source-path=SCRIPTDIR/../scripts
-# shellcheck source=submodules.sh
-. "$SCRIPTS/submodules.sh"
-check "env name transform: vault/Cove QMS -> VAULT_COVE_QMS" \
-  test "$(submodule_env_name 'vault/Cove QMS')" = VAULT_COVE_QMS
-check "env name transform: notes-2.0 -> NOTES_2_0" \
-  test "$(submodule_env_name 'notes-2.0')" = NOTES_2_0
-check "ssh alias: VAULT_COVE_QMS -> bridge-submodule-vault-cove-qms" \
-  test "$(submodule_ssh_alias VAULT_COVE_QMS)" = bridge-submodule-vault-cove-qms
-submodule_parse_ssh_url "git@github.com:coveqms/notes.git"
-check "scp url aliased" test "$(submodule_alias_url x)" = "git@x:coveqms/notes.git"
-submodule_parse_ssh_url "ssh://git@github.com:22/coveqms/notes.git"
-check "ssh:// url aliased" test "$(submodule_alias_url x)" = "ssh://git@x:22/coveqms/notes.git"
-check "https url is not routed" test "$(submodule_parse_ssh_url https://github.com/a/b.git; echo $?)" = 1
-check "local path is not routed" test "$(submodule_parse_ssh_url "$SUB_REMOTE"; echo $?)" = 1
-check "local path needs no key"  submodule_needs_no_key "$SUB_REMOTE"
-check "file:// needs no key"     submodule_needs_no_key "file://$SUB_REMOTE"
-check "https needs a key it can't have" test "$(submodule_needs_no_key https://github.com/a/b.git; echo $?)" = 1
+# (The name-transform / URL-parsing unit checks live in cmd/bridge/*_test.go.)
 
 printf '\n%s\n' "$([ "$fails" -eq 0 ] && echo "ALL PASSED" || echo "$fails FAILED")"
 [ "$fails" -eq 0 ]
