@@ -415,8 +415,11 @@ Good to know:
   was, and an `ALERT` is logged each cycle. The cycle still succeeds.
 - **Only folders inside the vault** are handled; submodules elsewhere in the
   repository are ignored. The branch is `main` unless `.gitmodules` sets
-  `branch = …`. Only `git@host:…` and `ssh://` URLs can be routed to a key,
-  and, as for the main repository, only github.com's host key is pinned.
+  `branch = …` (`branch = .` also means `main`). Only `git@host:…` and
+  `ssh://` URLs can be routed to a key — an `https://` submodule is treated
+  like one without a key (committed locally, alerted, never pushed), so use
+  the SSH address — and, as for the main repository, only github.com's host
+  key is pinned.
 - **`.gitmodules` stays canonical.** Inside the container, each key is routed
   through an SSH host alias (`bridge-submodule-…`) set on the folder's own
   `origin` remote; other clones see the ordinary URL.

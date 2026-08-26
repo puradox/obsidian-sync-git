@@ -60,16 +60,24 @@ submodule_alias_url() {
   fi
 }
 
+# in_vault PATH: the repo-relative PATH lies inside the vault (VAULT_DIR within
+# REPO_DIR; every path is when the vault is the repo root).
+in_vault() {
+  local vault_rel="${VAULT_DIR#"$REPO_DIR"}"
+  vault_rel="${vault_rel#/}"
+  [ -z "$vault_rel" ] || [[ "$1/" == "$vault_rel/"* ]]
+}
+
 # discover_submodules: read $REPO_DIR/.gitmodules into the parallel arrays
 # SUB_NAME / SUB_PATH / SUB_URL / SUB_BRANCH / SUB_ENV, keeping only submodules
 # whose path lies inside the vault (VAULT_DIR within REPO_DIR). Entries with an
 # unsafe path (absolute, or containing "..") are skipped with a warning.
-# Branch defaults to main; set `branch = ...` in .gitmodules to override.
+# Branch defaults to main; set `branch = ...` in .gitmodules to override
+# (`branch = .`, git's "same branch as the superproject", also means main).
 discover_submodules() {
-  local gm="$REPO_DIR/.gitmodules" vault_rel entry key name path url branch env prev
+  local gm="$REPO_DIR/.gitmodules" entry key name path url branch env prev
   SUB_NAME=() SUB_PATH=() SUB_URL=() SUB_BRANCH=() SUB_ENV=()
   [ -f "$gm" ] || return 0
-  vault_rel="${VAULT_DIR#"$REPO_DIR"}"; vault_rel="${vault_rel#/}"
   while IFS= read -r -d '' entry; do
     key="${entry%%$'\n'*}"; path="${entry#*$'\n'}"
     name="${key#submodule.}"; name="${name%.path}"
@@ -86,15 +94,18 @@ discover_submodules() {
         continue ;;
     esac
     # Only submodules inside the vault are the bridge's business.
-    [ -z "$vault_rel" ] || [[ "$path/" == "$vault_rel/"* ]] || continue
+    in_vault "$path" || continue
     url="$(git config -f "$gm" --get "submodule.$name.url" 2>/dev/null || true)"
     branch="$(git config -f "$gm" --get "submodule.$name.branch" 2>/dev/null || true)"
     if [ -z "$url" ]; then
       printf '[submodules] WARNING: ignoring submodule "%s": no url in .gitmodules\n' "$name" >&2
       continue
     fi
+    [ "$branch" = . ] && branch=main
     env="$(submodule_env_name "$name")"
-    for prev in "${SUB_ENV[@]}"; do
+    # ${arr[@]+"${arr[@]}"}: an empty array is an unbound variable under set -u
+    # on bash < 4.4 (macOS's /bin/bash).
+    for prev in ${SUB_ENV[@]+"${SUB_ENV[@]}"}; do
       [ "$prev" = "$env" ] && printf '[submodules] WARNING: submodules "%s" and another both map to %s — they will share one deploy key setting\n' "$name" "$env" >&2
     done
     SUB_NAME+=("$name"); SUB_PATH+=("$path"); SUB_URL+=("$url")
@@ -105,12 +116,19 @@ discover_submodules() {
 # submodule_has_key I: a deploy key was installed for submodule I.
 submodule_has_key() { [ -s "$(submodule_key_file "${SUB_ENV[$1]}")" ]; }
 
+# submodule_needs_no_key URL: a local path (or file:// URL) — reachable without
+# any credentials, so nothing to route. An https:// or git:// URL is neither
+# that nor routable: the bridge has no way to authenticate to it.
+submodule_needs_no_key() { [[ "$1" != *://* || "$1" == file://* ]]; }
+
 # submodule_can_reach_remote I: the bridge can talk to submodule I's remote —
-# either its key is installed and routed, or the URL isn't ssh at all (a local
-# path in tests, https, ...) so there is no deploy key to route.
+# its key is installed and routed (ssh), or the URL needs no key at all.
 submodule_can_reach_remote() {
-  submodule_parse_ssh_url "${SUB_URL[$1]}" || return 0
-  submodule_has_key "$1"
+  if submodule_parse_ssh_url "${SUB_URL[$1]}"; then
+    submodule_has_key "$1"
+  else
+    submodule_needs_no_key "${SUB_URL[$1]}"
+  fi
 }
 
 # submodule_routable I: submodule I has a key AND an ssh URL to route it to
@@ -153,7 +171,7 @@ configure_submodule_routing() {
       [ -n "$SSH_USER" ] && printf '  User %s\n' "$SSH_USER"
       printf '  IdentityFile %s\n\n' "$(submodule_key_file "${SUB_ENV[$i]}")"
     done
-  } > "$tmp"
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
   if cmp -s "$tmp" "$conf" 2>/dev/null; then rm -f "$tmp"; return 0; fi
   if ! chmod 600 "$tmp" || ! mv -f "$tmp" "$conf"; then rm -f "$tmp"; return 1; fi
 

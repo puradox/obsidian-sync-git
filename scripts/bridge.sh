@@ -384,7 +384,11 @@ submodule_cycle() (
   commit_working_tree "$ctx" || exit 1
 
   if ! submodule_can_reach_remote "$i"; then
-    alertlog "$ctx: no deploy key — its changes are committed locally and still sync to your devices, but nothing is pushed to ${SUB_URL[$i]}. Set GIT_SUBMODULE_DEPLOY_KEY_FILE_${SUB_ENV[$i]} (or GIT_SUBMODULE_DEPLOY_KEY_${SUB_ENV[$i]}) to a deploy key with write access to that repo and restart."
+    if submodule_parse_ssh_url "${SUB_URL[$i]}"; then
+      alertlog "$ctx: no deploy key — its changes are committed locally and still sync to your devices, but nothing is pushed to ${SUB_URL[$i]}. Set GIT_SUBMODULE_DEPLOY_KEY_FILE_${SUB_ENV[$i]} (or GIT_SUBMODULE_DEPLOY_KEY_${SUB_ENV[$i]}) to a deploy key with write access to that repo and restart."
+    else
+      alertlog "$ctx: ${SUB_URL[$i]} is not an ssh URL, so no deploy key can reach it — its changes are committed locally and still sync to your devices, but nothing is pushed. Change its url in .gitmodules to git@host:path (or ssh://host/path) and set GIT_SUBMODULE_DEPLOY_KEY_FILE_${SUB_ENV[$i]}."
+    fi
     exit 3
   fi
   fetch_branch "$branch" "$ctx" || exit 1
@@ -455,6 +459,8 @@ refresh_submodule_pointers() {
     path="${SUB_PATH[$i]}"; ctx="submodule ${SUB_NAME[$i]}"
     sub_on_remote "$i" || continue
     ref_present "HEAD:$path" || continue
+    # An empty checkout of an empty remote has no HEAD to record (or push).
+    git -C "$path" rev-parse --verify --quiet HEAD >/dev/null 2>&1 || continue
     ptr="$(git rev-parse --verify --quiet "origin/main:$path" 2>/dev/null)" || ptr=""
     if [ -n "$ptr" ] && ! git -C "$path" merge-base --is-ancestor "$ptr" HEAD 2>/dev/null; then
       ( cd "$path" && integrate_submodule_pointer "$i" "$ctx" && push_branch "${SUB_BRANCH[$i]}" "$ctx" ); rc=$?
@@ -498,29 +504,51 @@ submodule_exit_code() {
 #   - a materialized folder whose gitlink is gone (the submodule was removed
 #     upstream): its `.git` file would make the next `git add -A` re-add the
 #     pointer or fail outright. Detach it so its notes are plain vault files
-#     again (vault wins: nothing on the devices is deleted).
+#     again (vault wins: nothing on the devices is deleted), and drop its git
+#     dir under .git/modules with it — left behind, it would block the same
+#     submodule from ever being re-added (materialize_submodule refuses a git
+#     dir with history whose checkout has no `.git`).
 repair_submodule_transitions() {
-  local pre="$1" entry mode path vault_rel gitfile
+  local pre="$1" entry mode path gitfile
   head_present || return 0
-  vault_rel="${VAULT_DIR#"$REPO_DIR"}"; vault_rel="${vault_rel#/}"
   while IFS= read -r -d '' entry; do
     read -r mode _ _ <<< "${entry%%$'\t'*}"; path="${entry#*$'\t'}"
     [ "$mode" = 160000 ] || continue
-    [ -z "$vault_rel" ] || [[ "$path/" == "$vault_rel/"* ]] || continue
+    in_vault "$path" || continue
     [ -e "$path/.git" ] && continue
     [ -n "$pre" ] && [ "$(git cat-file -t "$pre:$path" 2>/dev/null)" = tree ] || continue
     alertlog "submodule at $path: origin/main turned this folder into a submodule; restoring its notes from the previous commit so nothing is deleted from your devices — they become the folder's first commit next cycle."
     mkdir -p "$path" || return 1
     git archive "$pre" -- "$path" | tar -x -C "$REPO_DIR" || { err "restoring $path from ${pre:0:12} failed"; return 1; }
   done < <(git ls-files -s -z)
+  # A materialized folder can only exist once a submodule has been listed and
+  # its git dir created, so skip the whole-tree walk for the common vault that
+  # has neither.
+  [ "${#SUB_NAME[@]}" -gt 0 ] || [ -d "$REPO_DIR/.git/modules" ] || return 0
   while IFS= read -r -d '' gitfile; do
     path="${gitfile#./}"; path="${path%/.git}"
-    [ -z "$vault_rel" ] || [[ "$path/" == "$vault_rel/"* ]] || continue
+    in_vault "$path" || continue
     index_is_gitlink "$path" && continue
     grep -q '^gitdir: .*\.git/modules/' "$gitfile" 2>/dev/null || continue
     alertlog "submodule at $path: no longer a submodule on origin/main — detaching the folder; its notes stay in the vault as plain files."
+    remove_module_gitdir "$gitfile"
     rm -f "$gitfile" || return 1
   done < <(find . -path ./.git -prune -o -type f -name .git -print0 2>/dev/null)
+}
+
+# remove_module_gitdir GITFILE: delete the git dir a submodule's `.git` file
+# points at, provided it really lives under $REPO_DIR/.git/modules (a `.git`
+# file pointing anywhere else is not ours to touch). Failure only logs — the
+# detach itself must still go ahead.
+remove_module_gitdir() {
+  local gitfile="$1" gitdir modules
+  gitdir="$(sed -n 's/^gitdir: //p' "$gitfile" 2>/dev/null | head -n1)"
+  [ -n "$gitdir" ] || return 0
+  case "$gitdir" in /*) ;; *) gitdir="$(dirname "$gitfile")/$gitdir" ;; esac
+  gitdir="$(cd "$gitdir" 2>/dev/null && pwd -P)" || return 0
+  modules="$(cd "$REPO_DIR/.git/modules" 2>/dev/null && pwd -P)" || return 0
+  case "$gitdir/" in "$modules"/?*) ;; *) return 0 ;; esac
+  rm -rf "$gitdir" || err "could not remove $gitdir — re-adding this submodule later will need it removed by hand"
 }
 
 # ---------------------------------------------------------------------------

@@ -324,9 +324,27 @@ run_cycle "submodule removed upstream is detached"
 check "removal alerted"                          logged "ALERT: submodule at vault/Legacy: no longer a submodule on origin/main — detaching"
 check "notes still in the vault"                 test -f "$VAULT_DIR/Legacy/l.md" -a -f "$VAULT_DIR/Legacy/seed.md"
 check "folder no longer a git checkout"          test ! -e "$VAULT_DIR/Legacy/.git"
+check "its git dir is gone too"                  test ! -e "$REPO_DIR/.git/modules/vault/Legacy"
 run_cycle "detached folder is committed as plain files"
 check "notes now plain files on the outer remote" \
   test "$(git -C "$OUTER_REMOTE" show main:vault/Legacy/l.md)" = "old note"
+check "outer tree clean after the cycle"         outer_clean
+
+# 11b -------------------------------------------------------------------------
+# The same folder is shared again later: a stale git dir left by the detach
+# must not block the folder from being materialized a second time.
+( cd "$T/collab-outer" && git pull -q --rebase origin main \
+  && git rm -q -r --cached vault/Legacy && rm -rf vault/Legacy \
+  && git -c protocol.file.allow=always submodule add -q --force "$LEGACY_REMOTE" vault/Legacy \
+  && git commit -qm "share Legacy again" && git push -q origin main )
+run_cycle "re-shared folder keeps its notes"
+check "re-conversion alerted"                    logged "ALERT: submodule at vault/Legacy: origin/main turned this folder into a submodule; restoring"
+check "note NOT deleted from the vault"          test "$(cat "$VAULT_DIR/Legacy/l.md")" = "old note"
+run_cycle "re-shared folder is materialized again"
+check "not refused"                              test "$(grep -c 'refusing to guess' "$T/cycle.log")" = 0
+check "folder is a git checkout again"           test -e "$VAULT_DIR/Legacy/.git"
+check "outer gitlink follows the folder's HEAD" \
+  test "$(outer_ptr vault/Legacy)" = "$(git -C "$VAULT_DIR/Legacy" rev-parse HEAD)"
 check "outer tree clean after the cycle"         outer_clean
 
 # --- unit-level: the env-var name transform -----------------------------------
@@ -345,6 +363,9 @@ submodule_parse_ssh_url "ssh://git@github.com:22/coveqms/notes.git"
 check "ssh:// url aliased" test "$(submodule_alias_url x)" = "ssh://git@x:22/coveqms/notes.git"
 check "https url is not routed" test "$(submodule_parse_ssh_url https://github.com/a/b.git; echo $?)" = 1
 check "local path is not routed" test "$(submodule_parse_ssh_url "$SUB_REMOTE"; echo $?)" = 1
+check "local path needs no key"  submodule_needs_no_key "$SUB_REMOTE"
+check "file:// needs no key"     submodule_needs_no_key "file://$SUB_REMOTE"
+check "https needs a key it can't have" test "$(submodule_needs_no_key https://github.com/a/b.git; echo $?)" = 1
 
 printf '\n%s\n' "$([ "$fails" -eq 0 ] && echo "ALL PASSED" || echo "$fails FAILED")"
 [ "$fails" -eq 0 ]

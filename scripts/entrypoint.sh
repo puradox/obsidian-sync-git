@@ -28,13 +28,23 @@ ts()  { date -u +%Y-%m-%dT%H:%M:%SZ; }
 log() { printf '[entrypoint %s] %s\n' "$(ts)" "$*"; }
 die() { printf '[entrypoint %s] FATAL: %s\n' "$(ts)" "$*" >&2; exit 1; }
 
+# --- show_path VALUE: VALUE as it may be printed in a "not a readable path"
+# message. A path is one short line; anything else (the secret itself pasted
+# into the _FILE variant by mistake) must never reach the logs.
+show_path() {
+  case "$1" in
+    *$'\n'*|*"PRIVATE KEY"*) printf '<redacted: looks like key material, not a path>' ;;
+    *) printf '%.200s' "$1" ;;
+  esac
+}
+
 # --- resolve VAR from VAR or VAR_FILE (compose-secret style). Never logs values.
 # $(...) strips the trailing newline a secret file usually carries.
 resolve_secret() {
   local name="$1" file_var val
   file_var="${name}_FILE"
   if [ -n "${!file_var:-}" ]; then
-    [ -r "${!file_var}" ] || die "${file_var} points to unreadable path: ${!file_var}"
+    [ -r "${!file_var}" ] || die "${file_var} points to unreadable path: $(show_path "${!file_var}")"
     val="$(cat "${!file_var}")"
     export "${name}=${val}"
   fi
@@ -46,30 +56,40 @@ resolve_secret() {
 # (OpenSSH rejects a key whose final newline was stripped, e.g. by a secret
 # store). The contents var is dropped from the environment so child processes
 # (cron/git/ob) and /proc/<pid>/environ don't carry it; git reaches the key via
-# ssh's config. Returns 1 if neither variable is set. Never logs values.
+# ssh's config. Returns 1 if neither variable is set, 2 if what was given is
+# unusable (an unreadable path, or an empty key) — the caller decides whether
+# that is fatal. Never logs values.
 install_key() {
   local name="$1" file_var="$2" dest="$3" val
   if [ -n "${!name:-}" ]; then
     val="${!name}"
     unset "$name"
   elif [ -n "${!file_var:-}" ]; then
-    [ -r "${!file_var}" ] || die "$file_var points to an unreadable path: ${!file_var}"
+    if [ ! -r "${!file_var}" ] || [ -d "${!file_var}" ]; then
+      log "WARNING: $file_var does not point to a readable file: $(show_path "${!file_var}")"
+      return 2
+    fi
     val="$(cat "${!file_var}")"
+    [ -n "$val" ] || { log "WARNING: the SSH key file $file_var points to is empty"; return 2; }
   else
     return 1
   fi
-  [ -n "$val" ] || die "The SSH key in $name is empty."
+  [ -n "$val" ] || { log "WARNING: the SSH key in $name is empty"; return 2; }
   ( umask 077; printf '%s\n' "${val%$'\n'}" > "$dest" )
   chmod 600 "$dest"
 }
 
 setup_ssh() {
-  local dest="$HOME/.ssh/id_deploy"
+  local dest="$HOME/.ssh/id_deploy" rc=0
   mkdir -p "$HOME/.ssh"
   chmod 700 "$HOME/.ssh"
 
-  install_key GIT_DEPLOY_KEY GIT_DEPLOY_KEY_FILE "$dest" \
-    || die "No SSH deploy key provided. Set GIT_DEPLOY_KEY (the private key contents) or GIT_DEPLOY_KEY_FILE (a mounted path). It must be passphrase-less and have write access to the repo."
+  install_key GIT_DEPLOY_KEY GIT_DEPLOY_KEY_FILE "$dest" || rc=$?
+  case "$rc" in
+    0) ;;
+    1) die "No SSH deploy key provided. Set GIT_DEPLOY_KEY (the private key contents) or GIT_DEPLOY_KEY_FILE (a mounted path). It must be passphrase-less and have write access to the repo." ;;
+    *) die "The SSH deploy key in GIT_DEPLOY_KEY / GIT_DEPLOY_KEY_FILE is unusable (see above)." ;;
+  esac
 
   cp "$BRIDGE_LIB/github_known_hosts" "$HOME/.ssh/known_hosts"
   chmod 644 "$HOME/.ssh/known_hosts"
@@ -107,7 +127,10 @@ setup_ssh() {
 # installed as ~/.ssh/id_submodule_<NAME>; bridge.sh routes it to the matching
 # submodule when it reads .gitmodules (which may not exist yet on first start).
 # A key removed from the environment is removed from disk too, so a submodule
-# can't keep pushing with a key you revoked.
+# can't keep pushing with a key you revoked. These keys are optional, so one
+# that is set but unusable (a typo'd mount, an empty value) is skipped with a
+# warning rather than stopping the whole vault from syncing: the bridge then
+# treats that submodule as keyless (alerted every cycle, committed locally).
 setup_submodule_keys() {
   local var name dest kept=()
   for var in $(compgen -A variable | grep -E '^GIT_SUBMODULE_DEPLOY_KEY(_FILE)?_[A-Z0-9_]+$' || true); do
@@ -120,8 +143,10 @@ setup_submodule_keys() {
     fi
     dest="$(submodule_key_file "$name")"
     case " ${kept[*]:-} " in *" $dest "*) continue ;; esac   # both variants set: installed once
-    install_key "GIT_SUBMODULE_DEPLOY_KEY_$name" "GIT_SUBMODULE_DEPLOY_KEY_FILE_$name" "$dest" \
-      || die "$var is empty"
+    if ! install_key "GIT_SUBMODULE_DEPLOY_KEY_$name" "GIT_SUBMODULE_DEPLOY_KEY_FILE_$name" "$dest"; then
+      log "WARNING: $var is set but unusable — skipping this submodule key; the folder still syncs to your devices and is committed locally, and each cycle will log an ALERT until it is fixed"
+      continue
+    fi
     kept+=("$dest")
     log "installed submodule deploy key for $name"
   done
