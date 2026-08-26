@@ -153,8 +153,9 @@ commit_working_tree() {
 # Merge strategies leave a submodule-pointer (gitlink) conflict unresolved even
 # under -X theirs. Resolve every such entry in favour of the commit being
 # replayed (stage 3 — the vault's pointer) and continue the rebase; the pointer
-# is re-derived from the submodule's HEAD afterwards anyway. Returns 1 if any
-# non-gitlink conflict remains (a real, unresolvable conflict).
+# is re-derived from the submodule's HEAD afterwards anyway. Returns 1 if
+# nothing was resolved or any non-gitlink conflict remains (a real,
+# unresolvable conflict).
 resolve_gitlink_conflicts() {
   local entry mode sha stage path resolved=0
   while IFS= read -r -d '' entry; do
@@ -183,7 +184,7 @@ resolve_gitlink_conflicts() {
 # alerted); 1 a non-conflict rebase failure (retry next tick); 2 a conflict that
 # can't be auto-resolved even for the vault (abort + alert). $2 labels messages.
 rebase_onto() {
-  local upstream="$1" ctx="$2" conflicted_files rounds=0
+  local upstream="$1" ctx="$2" conflicted_files rc
   ref_present "$upstream" || return 0
 
   # Fast path: a conflict-free rebase integrates both sides untouched.
@@ -204,12 +205,17 @@ rebase_onto() {
     alertlog "rebase conflict${ctx:+ on $ctx} AND the abort failed — repo may be left mid-rebase; run 'git rebase --abort' in $PWD."
     return 2
   fi
-  git rebase -X theirs "$upstream"
+  git rebase -X theirs "$upstream"; rc=$?
+  if [ "$rc" -ne 0 ] && ! rebase_in_progress; then
+    # Never started (index.lock, hook, disk full): nothing was integrated, so
+    # this is not a resolved conflict — retry next tick.
+    err "git rebase -X theirs $upstream failed${ctx:+ on $ctx} without starting — deferring to next tick"
+    return 1
+  fi
   # -X theirs cannot resolve submodule-pointer conflicts; do those by hand and
-  # continue (each replayed commit may stop once, so loop, bounded).
-  while rebase_in_progress && [ "$rounds" -lt 1000 ]; do
-    rounds=$((rounds + 1))
-    resolve_gitlink_conflicts || break
+  # continue. Each iteration resolves at least one entry or stops, so the loop
+  # is bounded by the number of replayed commits.
+  while rebase_in_progress && resolve_gitlink_conflicts; do
     GIT_EDITOR=true git rebase --continue >/dev/null 2>&1
   done
   if ! rebase_in_progress; then
@@ -285,14 +291,16 @@ ob_sync() {
 # ============================== submodules =================================
 #
 # Per-cycle state, indexed like the SUB_* arrays from discover_submodules:
-#   SUB_UPSTREAM[i]=1  the submodule's HEAD is known to be on its remote, so the
-#                      outer repo may record it as the gitlink. Otherwise the
-#                      gitlink keeps its previous value — the outer push must
-#                      never reference a commit the submodule remote lacks.
-#   SUB_RC[i]          worst failure seen for it this cycle (0, 1 or 2).
-SUB_UPSTREAM=() SUB_RC=()
+#   SUB_RC[i]  the submodule's result this cycle — submodule_cycle's exit code
+#              (0 HEAD is on its remote, 3 committed locally only, 1/2 failed).
+#              Only a 0 lets the outer repo record its HEAD as the gitlink;
+#              otherwise the gitlink keeps its previous value — the outer push
+#              must never reference a commit the submodule remote lacks.
+SUB_RC=()
 
-sub_note_rc() { [ "$2" -gt "${SUB_RC[$1]}" ] && SUB_RC[$1]="$2"; return 0; }
+sub_on_remote()   { [ "${SUB_RC[$1]:-1}" = 0 ]; }
+# The outer index records PATH as a submodule pointer (mode 160000).
+index_is_gitlink() { [ "$(git ls-files -s -- "$1" | cut -d' ' -f1)" = 160000 ]; }
 
 # Turn a live directory (already full of synced notes, or still empty) into a
 # submodule checkout WITHOUT touching its files: a git dir under
@@ -302,24 +310,28 @@ sub_note_rc() { [ "$2" -gt "${SUB_RC[$1]}" ] && SUB_RC[$1]="$2"; return 0; }
 # onto the remote branch, exactly like the outer repo's first sync (an empty
 # directory instead adopts the remote content — see submodule_cycle). We never
 # run `git submodule update`: it would check out over files devices may have
-# edited since the pointer was recorded.
+# edited since the pointer was recorded. Idempotent: a cycle killed halfway
+# through is completed on the next one.
 materialize_submodule() {
   local i="$1" name="${SUB_NAME[$1]}" path="${SUB_PATH[$1]}" url="${SUB_URL[$1]}"
-  local gitdir="$REPO_DIR/.git/modules/$name" up_from_path="" up_from_gitdir="../../" seg
-  [ -e "$path/.git" ] && return 0
-  [ -d "$gitdir" ] && { err "submodule $name: $gitdir exists but $path/.git does not — refusing to guess; remove one of them"; return 1; }
-  mkdir -p "$path" "$(dirname "$gitdir")" || return 1
-  log "submodule $name: initializing $path as a checkout of $url"
-  git init -q -b "${SUB_BRANCH[$i]}" --separate-git-dir "$gitdir" "$path" >/dev/null 2>&1 || { err "submodule $name: git init failed"; return 1; }
-  # Rewrite the absolute paths git init wrote as relative ones (like git
-  # submodule does) so the wiring survives the volume being mounted elsewhere.
-  IFS=/ read -r -a seg <<< "$path"
-  up_from_path="$(printf '../%.0s' "${seg[@]}")"
-  IFS=/ read -r -a seg <<< "$name"
-  up_from_gitdir="$up_from_gitdir$(printf '../%.0s' "${seg[@]}")"
-  printf 'gitdir: %s.git/modules/%s\n' "$up_from_path" "$name" > "$path/.git" || return 1
-  git -C "$path" config core.worktree "$up_from_gitdir$path" || return 1
-  git -C "$path" remote add origin "$url" || return 1
+  local gitdir="$REPO_DIR/.git/modules/$name"
+  if [ ! -e "$path/.git" ]; then
+    if [ -d "$gitdir" ]; then
+      if git --git-dir="$gitdir" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
+        err "submodule $name: $gitdir has history but $path/.git is missing — refusing to guess; remove one of them"
+        return 1
+      fi
+      rm -rf "$gitdir"   # an init a killed cycle never finished: start over
+    fi
+    mkdir -p "$path" || return 1
+    log "submodule $name: initializing $path as a checkout of $url"
+    git init -q -b "${SUB_BRANCH[$i]}" "$path" >/dev/null 2>&1 || { err "submodule $name: git init failed"; return 1; }
+    # Move the git dir under .git/modules/<name> with the relative gitdir /
+    # core.worktree wiring `git submodule` uses, so it survives the volume
+    # being mounted elsewhere.
+    git submodule absorbgitdirs -- "$path" >/dev/null 2>&1 || { err "submodule $name: git submodule absorbgitdirs failed"; return 1; }
+  fi
+  git -C "$path" remote get-url origin >/dev/null 2>&1 || git -C "$path" remote add origin "$url" || return 1
 }
 
 # Bring submodule I (the cwd) up to what the outer repo's origin/main points it
@@ -397,36 +409,35 @@ submodule_cycle() (
 
 # Pre-pass: run every submodule's own cycle before the outer one.
 run_submodule_cycles() {
-  local i rc
+  local i
   for i in "${!SUB_NAME[@]}"; do
-    SUB_UPSTREAM[i]=0; SUB_RC[i]=0
+    SUB_RC[i]=3
     # .gitmodules lists it, but the outer index has no gitlink there: its files
     # are plain vault files, and turning them into a submodule would move them
     # out of the outer repo. Leave it alone until the pointer exists upstream.
-    if [ "$(git ls-files -s -- "${SUB_PATH[$i]}" | cut -d' ' -f1)" != 160000 ]; then
+    if ! index_is_gitlink "${SUB_PATH[$i]}"; then
       alertlog "submodule ${SUB_NAME[$i]}: listed in .gitmodules but ${SUB_PATH[$i]} is not a submodule pointer in the repo — ignoring it. Add it with 'git submodule add' in a clone and merge that."
       continue
     fi
-    if ! materialize_submodule "$i"; then sub_note_rc "$i" 1; continue; fi
-    submodule_cycle "$i"; rc=$?
-    case "$rc" in
-      0) SUB_UPSTREAM[i]=1 ;;
-      3) ;;
-      *) sub_note_rc "$i" "$rc" ;;
-    esac
+    if ! materialize_submodule "$i"; then SUB_RC[i]=1; continue; fi
+    # The submodule's own origin carries the routed (per-key) URL; .gitmodules
+    # keeps the canonical one for every other clone.
+    git -C "${SUB_PATH[$i]}" remote set-url origin "$(submodule_routed_url "$i")" || { SUB_RC[i]=1; continue; }
+    submodule_cycle "$i"; SUB_RC[i]=$?
   done
 }
 
 # After `git add -A` in the outer repo: un-stage the gitlink of any submodule
 # whose HEAD isn't on its remote, so the outer push never references a commit
-# the submodule remote lacks (the pointer just stays where it was).
+# the submodule remote lacks (the pointer just stays where it was). Only real
+# gitlinks — a listed path that is still a plain folder must keep its edits.
 unstage_unpushed_gitlinks() {
   local i path
   head_present || return 0
   for i in "${!SUB_NAME[@]}"; do
-    [ "${SUB_UPSTREAM[$i]}" = 1 ] && continue
+    sub_on_remote "$i" && continue
     path="${SUB_PATH[$i]}"
-    if ref_present "HEAD:$path"; then
+    if index_is_gitlink "$path" && ref_present "HEAD:$path"; then
       git reset -q -- "$path" >/dev/null 2>&1 || return 1
     fi
   done
@@ -442,14 +453,14 @@ refresh_submodule_pointers() {
   head_present || return 0
   for i in "${!SUB_NAME[@]}"; do
     path="${SUB_PATH[$i]}"; ctx="submodule ${SUB_NAME[$i]}"
-    [ "${SUB_RC[$i]}" = 0 ] && [ "${SUB_UPSTREAM[$i]}" = 1 ] || continue
+    sub_on_remote "$i" || continue
     ref_present "HEAD:$path" || continue
     ptr="$(git rev-parse --verify --quiet "origin/main:$path" 2>/dev/null)" || ptr=""
     if [ -n "$ptr" ] && ! git -C "$path" merge-base --is-ancestor "$ptr" HEAD 2>/dev/null; then
       ( cd "$path" && integrate_submodule_pointer "$i" "$ctx" && push_branch "${SUB_BRANCH[$i]}" "$ctx" ); rc=$?
-      if [ "$rc" -ne 0 ]; then sub_note_rc "$i" "$rc"; SUB_UPSTREAM[i]=0; continue; fi
+      if [ "$rc" -ne 0 ]; then SUB_RC[i]="$rc"; continue; fi
     fi
-    git add -- "$path" || { err "$ctx: git add of the gitlink failed"; sub_note_rc "$i" 1; }
+    git add -- "$path" || { err "$ctx: git add of the gitlink failed"; SUB_RC[i]=1; }
   done
   # Per-submodule failures stay in SUB_RC for submodule_exit_code; only a
   # failure to commit the outer repo stops the cycle here.
@@ -466,10 +477,50 @@ refresh_submodule_pointers() {
 # failed this cycle (not a missing key — that only alerts) is a failed cycle,
 # so the healthcheck can see it, even though everything else went through.
 submodule_exit_code() {
-  local i worst=0
-  for i in "${!SUB_NAME[@]}"; do [ "${SUB_RC[$i]}" -gt "$worst" ] && worst="${SUB_RC[$i]}"; done
+  local i rc worst=0
+  for i in "${!SUB_NAME[@]}"; do
+    rc="${SUB_RC[$i]}"
+    [ "$rc" = 3 ] && continue
+    [ "$rc" -gt "$worst" ] && worst="$rc"
+  done
   [ "$worst" -eq 0 ] || err "$worst-class failure in a submodule this cycle (see above) — the outer vault still synced"
   return "$worst"
+}
+
+# The outer rebase just checked out origin/main. Two shapes of submodule change
+# arriving from upstream need the working tree repaired BEFORE anything is
+# synced to devices ($1 = HEAD before the rebase, or empty):
+#   - a folder that was plain files in $1 and is a gitlink now (the README's
+#     "folder already had notes" conversion): git emptied it on checkout, and
+#     the device push would delete those notes everywhere. Put the pre-rebase
+#     files back; the next pre-pass materializes the folder and commits them
+#     as its root commit, rebased vault-wins onto the folder's repo.
+#   - a materialized folder whose gitlink is gone (the submodule was removed
+#     upstream): its `.git` file would make the next `git add -A` re-add the
+#     pointer or fail outright. Detach it so its notes are plain vault files
+#     again (vault wins: nothing on the devices is deleted).
+repair_submodule_transitions() {
+  local pre="$1" entry mode path vault_rel gitfile
+  head_present || return 0
+  vault_rel="${VAULT_DIR#"$REPO_DIR"}"; vault_rel="${vault_rel#/}"
+  while IFS= read -r -d '' entry; do
+    read -r mode _ _ <<< "${entry%%$'\t'*}"; path="${entry#*$'\t'}"
+    [ "$mode" = 160000 ] || continue
+    [ -z "$vault_rel" ] || [[ "$path/" == "$vault_rel/"* ]] || continue
+    [ -e "$path/.git" ] && continue
+    [ -n "$pre" ] && [ "$(git cat-file -t "$pre:$path" 2>/dev/null)" = tree ] || continue
+    alertlog "submodule at $path: origin/main turned this folder into a submodule; restoring its notes from the previous commit so nothing is deleted from your devices — they become the folder's first commit next cycle."
+    mkdir -p "$path" || return 1
+    git archive "$pre" -- "$path" | tar -x -C "$REPO_DIR" || { err "restoring $path from ${pre:0:12} failed"; return 1; }
+  done < <(git ls-files -s -z)
+  while IFS= read -r -d '' gitfile; do
+    path="${gitfile#./}"; path="${path%/.git}"
+    [ -z "$vault_rel" ] || [[ "$path/" == "$vault_rel/"* ]] || continue
+    index_is_gitlink "$path" && continue
+    grep -q '^gitdir: .*\.git/modules/' "$gitfile" 2>/dev/null || continue
+    alertlog "submodule at $path: no longer a submodule on origin/main — detaching the folder; its notes stay in the vault as plain files."
+    rm -f "$gitfile" || return 1
+  done < <(find . -path ./.git -prune -o -type f -name .git -print0 2>/dev/null)
 }
 
 # ---------------------------------------------------------------------------
@@ -499,6 +550,8 @@ commit_working_tree "" || exit 1
 # (c) Bring in merged skill PRs (== git pull --rebase origin main), with the
 #     network step (fetch) split from the merge step (rebase) so a network
 #     error (retry next tick) is never mistaken for a real conflict (alert).
+#     Fetched again after the submodule pre-pass on purpose: a pointer that
+#     moved meanwhile is integrated here rather than as a rejected push.
 fetch_branch main "" || exit 1
 
 if ! head_present; then
@@ -518,10 +571,13 @@ if ! head_present; then
   fi
 fi
 
+pre_rebase="$(git rev-parse --verify --quiet HEAD)" || pre_rebase=""
 rebase_onto origin/main "" || exit "$?"
 
-# (c') Re-record every submodule pointer from its submodule's HEAD (following
+# (c') Repair folders that origin/main turned into, or out of, submodules, then
+#      re-record every submodule pointer from its submodule's HEAD (following
 #      any pointer origin/main moved since the pre-pass).
+repair_submodule_transitions "$pre_rebase" || exit 1
 refresh_submodule_pointers || exit "$?"
 
 # (d) Publish to main.

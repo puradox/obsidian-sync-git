@@ -15,6 +15,9 @@
 #      backwards; the pointer is re-recorded from HEAD
 #   5. a conflicting upstream edit (and a conflicting outer pointer bump)
 #      resolves vault-wins, with the non-conflicting upstream change merged in
+#   9. a .gitmodules entry without a gitlink is ignored but its edits still commit
+#  10. a folder of existing notes converted to a submodule keeps its notes
+#  11. a submodule removed upstream is detached, its notes kept as plain files
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -264,6 +267,67 @@ run_cycle "idle cycle"
 check "nothing pushed on an idle cycle" logged "nothing to push (origin/main is up to date)"
 check "nothing pushed for the submodule" logged "nothing to push for submodule vault/Cove QMS"
 check "keyless submodule alerts exactly once per cycle" test "$(grep -c 'ALERT: submodule vault/NoKey' "$T/cycle.log")" -eq 1
+
+# 9 ---------------------------------------------------------------------------
+# .gitmodules lists a folder that is still plain files (hand-edited): it is
+# ignored, and — crucially — device edits under it keep being committed.
+( cd "$T/collab-outer" && git pull -q --rebase origin main \
+  && mkdir -p vault/Plain && echo "p" > vault/Plain/p.md \
+  && git config -f .gitmodules submodule.vault/Plain.path vault/Plain \
+  && git config -f .gitmodules submodule.vault/Plain.url "$NOKEY_URL" \
+  && git add -A && git commit -qm "list vault/Plain without a gitlink" && git push -q origin main )
+run_cycle "listed folder that is not a gitlink arrives"
+check "plain folder synced to the vault" test -f "$VAULT_DIR/Plain/p.md"
+echo "edited on a device" > "$VAULT_DIR/Plain/p.md"
+run_cycle "device edit under the listed plain folder is still committed"
+check "plain folder alerted"            logged "ALERT: submodule vault/Plain: listed in .gitmodules but vault/Plain is not a submodule pointer"
+check "edit under the plain folder pushed" \
+  test "$(git -C "$OUTER_REMOTE" show main:vault/Plain/p.md)" = "edited on a device"
+check "plain folder never materialized" test ! -e "$VAULT_DIR/Plain/.git"
+
+# 10 --------------------------------------------------------------------------
+# A folder that already has notes on the devices is turned into a submodule by
+# a merged PR. The notes must survive (they become the folder's first commit,
+# rebased onto the folder's repo), never be deleted from the devices.
+LEGACY_REMOTE="$T/remotes/legacy.git"
+git init -q --bare -b main "$LEGACY_REMOTE"
+git clone -q "$LEGACY_REMOTE" "$T/collab-legacy" 2>/dev/null
+( cd "$T/collab-legacy" && git checkout -q -b main && echo "seed" > seed.md && git add -A \
+  && git commit -qm "legacy: seed" && git push -q origin main )
+( cd "$T/collab-outer" && git pull -q --rebase origin main \
+  && mkdir -p vault/Legacy && echo "old note" > vault/Legacy/l.md \
+  && git add -A && git commit -qm "plain Legacy folder" && git push -q origin main )
+run_cycle "plain Legacy folder arrives"
+check "legacy note in the vault" test -f "$VAULT_DIR/Legacy/l.md"
+( cd "$T/collab-outer" && git pull -q --rebase origin main \
+  && git rm -q -r --cached vault/Legacy && rm -rf vault/Legacy \
+  && git -c protocol.file.allow=always submodule add -q "$LEGACY_REMOTE" vault/Legacy \
+  && git commit -qm "share Legacy as a submodule" && git push -q origin main )
+run_cycle "folder converted to a submodule keeps its notes"
+check "conversion alerted"                       logged "ALERT: submodule at vault/Legacy: origin/main turned this folder into a submodule; restoring"
+check "note NOT deleted from the vault"          test "$(cat "$VAULT_DIR/Legacy/l.md")" = "old note"
+check "outer gitlink recorded for Legacy"        test "$(git -C "$REPO_DIR" ls-files -s vault/Legacy | cut -d' ' -f1)" = 160000
+run_cycle "converted folder's notes become its first commit"
+check "note pushed to the folder's repo"         test "$(git -C "$LEGACY_REMOTE" show main:l.md)" = "old note"
+check "folder's seed merged in"                  test -f "$VAULT_DIR/Legacy/seed.md"
+check "outer gitlink follows the folder's HEAD" \
+  test "$(outer_ptr vault/Legacy)" = "$(git -C "$VAULT_DIR/Legacy" rev-parse HEAD)"
+check "outer tree clean after the cycle"         outer_clean
+
+# 11 --------------------------------------------------------------------------
+# The submodule is removed again by a merged PR: the folder is detached, its
+# notes stay, and the outer cycle keeps working (no half-submodule left over).
+( cd "$T/collab-outer" && git pull -q --rebase origin main \
+  && git -c protocol.file.allow=always submodule update -q --init vault/Legacy \
+  && git rm -q vault/Legacy && git commit -qm "unshare Legacy" && git push -q origin main )
+run_cycle "submodule removed upstream is detached"
+check "removal alerted"                          logged "ALERT: submodule at vault/Legacy: no longer a submodule on origin/main — detaching"
+check "notes still in the vault"                 test -f "$VAULT_DIR/Legacy/l.md" -a -f "$VAULT_DIR/Legacy/seed.md"
+check "folder no longer a git checkout"          test ! -e "$VAULT_DIR/Legacy/.git"
+run_cycle "detached folder is committed as plain files"
+check "notes now plain files on the outer remote" \
+  test "$(git -C "$OUTER_REMOTE" show main:vault/Legacy/l.md)" = "old note"
+check "outer tree clean after the cycle"         outer_clean
 
 # --- unit-level: the env-var name transform -----------------------------------
 # shellcheck source-path=SCRIPTDIR/../scripts

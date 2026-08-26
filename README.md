@@ -418,8 +418,11 @@ Good to know:
   `branch = …`. Only `git@host:…` and `ssh://` URLs can be routed to a key,
   and, as for the main repository, only github.com's host key is pinned.
 - **`.gitmodules` stays canonical.** Inside the container, each key is routed
-  through an SSH host alias (`bridge-submodule-…`) and a git `url.insteadOf`
-  rewrite; other clones see the ordinary URL.
+  through an SSH host alias (`bridge-submodule-…`) set on the folder's own
+  `origin` remote; other clones see the ordinary URL.
+- **Removing the submodule** (a merged pull request that drops it) detaches
+  the folder on the bridge: its notes stay in your vault as plain files and
+  nothing is deleted from your devices.
 - **The folder's `.git` never reaches your devices.** Obsidian Sync skips
   every file and folder whose name starts with a dot (apart from `.obsidian`),
   so the small `.git` file the bridge keeps in the folder stays on the bridge.

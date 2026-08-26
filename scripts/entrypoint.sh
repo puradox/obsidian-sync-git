@@ -40,30 +40,36 @@ resolve_secret() {
   fi
 }
 
+# --- install_key CONTENTS_VAR FILE_VAR DEST: install a private key given as an
+# env var (the contents) or a mounted file (a path — the more secret-safe
+# option) at DEST, mode 600. Normalizes to exactly one trailing newline
+# (OpenSSH rejects a key whose final newline was stripped, e.g. by a secret
+# store). The contents var is dropped from the environment so child processes
+# (cron/git/ob) and /proc/<pid>/environ don't carry it; git reaches the key via
+# ssh's config. Returns 1 if neither variable is set. Never logs values.
+install_key() {
+  local name="$1" file_var="$2" dest="$3" val
+  if [ -n "${!name:-}" ]; then
+    val="${!name}"
+    unset "$name"
+  elif [ -n "${!file_var:-}" ]; then
+    [ -r "${!file_var}" ] || die "$file_var points to an unreadable path: ${!file_var}"
+    val="$(cat "${!file_var}")"
+  else
+    return 1
+  fi
+  [ -n "$val" ] || die "The SSH key in $name is empty."
+  ( umask 077; printf '%s\n' "${val%$'\n'}" > "$dest" )
+  chmod 600 "$dest"
+}
+
 setup_ssh() {
   local dest="$HOME/.ssh/id_deploy"
   mkdir -p "$HOME/.ssh"
   chmod 700 "$HOME/.ssh"
 
-  # The key may be provided as an env var (GIT_DEPLOY_KEY, the contents) or as a
-  # mounted file (GIT_DEPLOY_KEY_FILE, a path — the more secret-safe option).
-  if [ -n "${GIT_DEPLOY_KEY:-}" ]; then
-    # Normalize to exactly one trailing newline (OpenSSH requires the key to end
-    # with a newline). umask keeps the file 600 as it's written.
-    ( umask 077; printf '%s\n' "${GIT_DEPLOY_KEY%$'\n'}" > "$dest" )
-    # Drop the key from the environment so child processes (cron/git/ob) and
-    # /proc/<pid>/environ don't carry it; git reaches it via GIT_SSH_COMMAND.
-    unset GIT_DEPLOY_KEY
-  elif [ -n "${GIT_DEPLOY_KEY_FILE:-}" ]; then
-    [ -r "$GIT_DEPLOY_KEY_FILE" ] || die "GIT_DEPLOY_KEY_FILE points to an unreadable path: $GIT_DEPLOY_KEY_FILE"
-    # Same trailing-newline normalization as the env path — OpenSSH rejects a
-    # key whose final newline was stripped (e.g. by a secret store).
-    ( umask 077; printf '%s\n' "$(cat "$GIT_DEPLOY_KEY_FILE")" > "$dest" )
-  else
-    die "No SSH deploy key provided. Set GIT_DEPLOY_KEY (the private key contents) or GIT_DEPLOY_KEY_FILE (a mounted path). It must be passphrase-less and have write access to the repo."
-  fi
-  chmod 600 "$dest"
-  [ -s "$dest" ] || die "The SSH deploy key is empty."
+  install_key GIT_DEPLOY_KEY GIT_DEPLOY_KEY_FILE "$dest" \
+    || die "No SSH deploy key provided. Set GIT_DEPLOY_KEY (the private key contents) or GIT_DEPLOY_KEY_FILE (a mounted path). It must be passphrase-less and have write access to the repo."
 
   cp "$BRIDGE_LIB/github_known_hosts" "$HOME/.ssh/known_hosts"
   chmod 644 "$HOME/.ssh/known_hosts"
@@ -103,21 +109,19 @@ setup_ssh() {
 # A key removed from the environment is removed from disk too, so a submodule
 # can't keep pushing with a key you revoked.
 setup_submodule_keys() {
-  local var name dest val kept=()
+  local var name dest kept=()
   for var in $(compgen -A variable | grep -E '^GIT_SUBMODULE_DEPLOY_KEY(_FILE)?_[A-Z0-9_]+$' || true); do
+    # A name that itself starts with FILE_ is ambiguous here; the _FILE_ form
+    # wins, matching the README's derivation for the documented setting.
     if [[ "$var" == GIT_SUBMODULE_DEPLOY_KEY_FILE_* ]]; then
       name="${var#GIT_SUBMODULE_DEPLOY_KEY_FILE_}"
-      [ -r "${!var}" ] || die "$var points to an unreadable path: ${!var}"
-      val="$(cat "${!var}")"
     else
       name="${var#GIT_SUBMODULE_DEPLOY_KEY_}"
-      val="${!var}"
-      unset "$var"   # keep the key out of child environments, like GIT_DEPLOY_KEY
     fi
-    [ -n "$val" ] || die "$var is empty"
     dest="$(submodule_key_file "$name")"
-    ( umask 077; printf '%s\n' "${val%$'\n'}" > "$dest" )
-    chmod 600 "$dest"
+    case " ${kept[*]:-} " in *" $dest "*) continue ;; esac   # both variants set: installed once
+    install_key "GIT_SUBMODULE_DEPLOY_KEY_$name" "GIT_SUBMODULE_DEPLOY_KEY_FILE_$name" "$dest" \
+      || die "$var is empty"
     kept+=("$dest")
     log "installed submodule deploy key for $name"
   done
