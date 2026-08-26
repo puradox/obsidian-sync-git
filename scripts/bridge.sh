@@ -516,7 +516,8 @@ repair_submodule_transitions() {
     [ "$mode" = 160000 ] || continue
     in_vault "$path" || continue
     [ -e "$path/.git" ] && continue
-    [ -n "$pre" ] && [ "$(git cat-file -t "$pre:$path" 2>/dev/null)" = tree ] || continue
+    [ -n "$pre" ] || continue
+    [ "$(git cat-file -t "$pre:$path" 2>/dev/null)" = tree ] || continue
     alertlog "submodule at $path: origin/main turned this folder into a submodule; restoring its notes from the previous commit so nothing is deleted from your devices — they become the folder's first commit next cycle."
     mkdir -p "$path" || return 1
     git archive "$pre" -- "$path" | tar -x -C "$REPO_DIR" || { err "restoring $path from ${pre:0:12} failed"; return 1; }
