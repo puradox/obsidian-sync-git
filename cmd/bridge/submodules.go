@@ -122,7 +122,8 @@ func unsafePath(p string, rejectGit bool) bool {
 
 // discoverSubmodules reads <repo>/.gitmodules, keeping only submodules whose
 // path lies inside the vault. Entries with an unsafe path or name are skipped
-// with a warning. Branch defaults to main; `branch = ...` overrides.
+// with a warning. Branch defaults to main; `branch = ...` overrides
+// (`branch = .`, git's "same branch as the superproject", also means main).
 func discoverSubmodules(cfg config) []*submodule {
 	gm := filepath.Join(cfg.repoDir, ".gitmodules")
 	if !isFile(gm) {
@@ -160,7 +161,7 @@ func discoverSubmodules(cfg config) []*submodule {
 			logErr("ignoring submodule %q: no url in .gitmodules", name)
 			continue
 		}
-		if branch == "" {
+		if branch == "" || branch == "." {
 			branch = "main"
 		}
 		env := envName(name)
@@ -194,14 +195,20 @@ func (s *submodule) hasKey(cfg config) bool {
 	return err == nil && st.Size() > 0
 }
 
-// canReachRemote: the bridge can talk to the submodule's remote — either its
-// key is installed and routed, or the URL isn't ssh at all (a local path in
-// tests, https, ...) so there is no deploy key to route.
+// needsNoKey: a local path (or file:// URL) — reachable without any
+// credentials, so nothing to route. An https:// or git:// URL is neither that
+// nor routable: the bridge has no way to authenticate to it.
+func needsNoKey(url string) bool {
+	return !strings.Contains(url, "://") || strings.HasPrefix(url, "file://")
+}
+
+// canReachRemote: the bridge can talk to the submodule's remote — its key is
+// installed and routed (ssh), or the URL needs no key at all.
 func (s *submodule) canReachRemote(cfg config) bool {
-	if _, ok := parseSSHURL(s.url); !ok {
-		return true
+	if _, ok := parseSSHURL(s.url); ok {
+		return s.hasKey(cfg)
 	}
-	return s.hasKey(cfg)
+	return needsNoKey(s.url)
 }
 
 // routable: the submodule has a key AND an ssh URL to route it to.

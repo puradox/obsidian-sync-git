@@ -56,6 +56,22 @@ func TestParseSSHURL(t *testing.T) {
 	}
 }
 
+func TestNeedsNoKey(t *testing.T) {
+	cases := map[string]bool{
+		"/tmp/remotes/notes.git":           true,
+		"../notes.git":                     true,
+		"file:///tmp/notes.git":            true,
+		"https://github.com/a/b.git":       false,
+		"git://github.com/a/b.git":         false,
+		"git@github.com:coveqms/notes.git": true, // ssh: parseSSHURL decides, not this
+	}
+	for url, want := range cases {
+		if got := needsNoKey(url); got != want {
+			t.Errorf("needsNoKey(%q) = %v, want %v", url, got, want)
+		}
+	}
+}
+
 func TestUnsafePath(t *testing.T) {
 	cases := []struct {
 		p         string

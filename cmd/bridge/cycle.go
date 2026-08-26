@@ -113,7 +113,11 @@ func (c *cycle) submoduleCycle(s *submodule) rc {
 		return rcRetry
 	}
 	if !s.canReachRemote(c.cfg) {
-		logAlert("%s: no deploy key — its changes are committed locally and still sync to your devices, but nothing is pushed to %s. Set GIT_SUBMODULE_DEPLOY_KEY_FILE_%s (or GIT_SUBMODULE_DEPLOY_KEY_%s) to a deploy key with write access to that repo and restart.", ctx, s.url, s.env, s.env)
+		if _, ok := parseSSHURL(s.url); ok {
+			logAlert("%s: no deploy key — its changes are committed locally and still sync to your devices, but nothing is pushed to %s. Set GIT_SUBMODULE_DEPLOY_KEY_FILE_%s (or GIT_SUBMODULE_DEPLOY_KEY_%s) to a deploy key with write access to that repo and restart.", ctx, s.url, s.env, s.env)
+		} else {
+			logAlert("%s: %s is not an ssh URL, so no deploy key can reach it — its changes are committed locally and still sync to your devices, but nothing is pushed. Change its url in .gitmodules to git@host:path (or ssh://host/path) and set GIT_SUBMODULE_DEPLOY_KEY_FILE_%s.", ctx, s.url, s.env)
+		}
 		return rcLocalOnly
 	}
 	if !s.repo.fetchBranch(s.branch, ctx) {
@@ -208,6 +212,10 @@ func (c *cycle) refreshSubmodulePointers() rc {
 		if !s.onRemote() || !c.outer.refPresent("HEAD:"+s.path) {
 			continue
 		}
+		// An empty checkout of an empty remote has no HEAD to record (or push).
+		if !s.repo.headPresent() {
+			continue
+		}
 		if ptr, ok := c.outer.revParse("origin/main:" + s.path); ok && !s.repo.isAncestor(ptr, "HEAD") {
 			r := c.integratePointer(s)
 			if r == rcOK {
@@ -264,7 +272,10 @@ func (c *cycle) submoduleExitCode() rc {
 //   - a materialized folder whose gitlink is gone (the submodule was removed
 //     upstream): its `.git` file would make the next `git add -A` re-add the
 //     pointer or fail outright. Detach it so its notes are plain vault files
-//     again (vault wins: nothing on the devices is deleted).
+//     again (vault wins: nothing on the devices is deleted), and drop its git
+//     dir under .git/modules with it — left behind, it would block the same
+//     submodule from ever being re-added (materialize refuses a git dir with
+//     history whose checkout has no `.git`).
 func (c *cycle) repairSubmoduleTransitions(pre string) bool {
 	if !c.outer.headPresent() {
 		return true
@@ -303,18 +314,27 @@ func (c *cycle) repairSubmoduleTransitions(pre string) bool {
 		}
 	}
 
+	// A materialized folder can only exist once a submodule has been listed and
+	// its git dir created, so skip the whole-tree walk for the common vault
+	// that has neither.
 	root := c.cfg.repoDir
+	modules := filepath.Join(root, ".git", "modules")
+	if len(c.subs) == 0 && !isDir(modules) {
+		return true
+	}
 	return filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
-		if d.IsDir() {
-			if p == filepath.Join(root, ".git") {
+		// The repo's own .git, whether a directory or (a worktree or nested
+		// checkout) a gitdir file, is never a submodule pointer.
+		if p == filepath.Join(root, ".git") {
+			if d.IsDir() {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		if d.Name() != ".git" {
+		if d.IsDir() || d.Name() != ".git" {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, filepath.Dir(p))
@@ -327,11 +347,38 @@ func (c *cycle) repairSubmoduleTransitions(pre string) bool {
 			return nil
 		}
 		logAlert("submodule at %s: no longer a submodule on origin/main — detaching the folder; its notes stay in the vault as plain files.", path)
+		removeModuleGitdir(p, string(content), modules)
 		if err := os.Remove(p); err != nil {
 			return err
 		}
 		return filepath.SkipDir
 	}) == nil
+}
+
+// removeModuleGitdir deletes the git dir a submodule's `.git` file (at
+// gitfile, with the given content) points at, provided it really lives under
+// modules (<repo>/.git/modules) — a `.git` file pointing anywhere else is not
+// ours to touch. Failure only logs: the detach itself must still go ahead.
+func removeModuleGitdir(gitfile, content, modules string) {
+	line, _, _ := strings.Cut(content, "\n")
+	gitdir := strings.TrimPrefix(line, "gitdir: ")
+	if gitdir == "" {
+		return
+	}
+	if !filepath.IsAbs(gitdir) {
+		gitdir = filepath.Join(filepath.Dir(gitfile), gitdir)
+	}
+	gitdir, err := filepath.EvalSymlinks(gitdir)
+	if err != nil {
+		return
+	}
+	modules, err = filepath.EvalSymlinks(modules)
+	if err != nil || !strings.HasPrefix(gitdir, modules+string(filepath.Separator)) {
+		return
+	}
+	if err := os.RemoveAll(gitdir); err != nil {
+		logErr("could not remove %s — re-adding this submodule later will need it removed by hand: %v", gitdir, err)
+	}
 }
 
 // restoreTree writes the files under path as of commit pre back into the

@@ -18,10 +18,14 @@ import (
 // like any other failure: defer and retry next tick. The lock descriptor is
 // close-on-exec, so even an `ob` that lingers past its parent can never keep
 // the cycle lock held. stdin is /dev/null so the CLI can never block on an
-// interactive prompt.
+// interactive prompt. OB_SYNC_TIMEOUT=0 disables the timeout, as it does for
+// GNU `timeout` in the shell version.
 func obSync(cfg config, phase string) bool {
 	logInfo("ob sync (%s)", phase)
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.obSyncTimeout)
+	ctx, cancel := context.WithCancel(context.Background())
+	if cfg.obSyncTimeout > 0 {
+		ctx, cancel = context.WithTimeout(context.Background(), cfg.obSyncTimeout)
+	}
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "ob", "sync", "--path", cfg.vaultDir)
 	cmd.Stdin = nil
