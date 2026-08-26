@@ -25,8 +25,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run a bridge cycle against local bare remotes (ob stubbed)
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run bridge cycles against local bare remotes (ob stubbed) — shell
         run: tests/submodule_cycle_test.sh
+
+      # The Go port must pass the same scenarios unchanged; it is the
+      # acceptance test for replacing scripts/bridge.sh.
+      - name: Run bridge cycles against local bare remotes (ob stubbed) — Go
+        run: |
+          go build -o /tmp/bridge ./cmd/bridge
+          BRIDGE_BIN=/tmp/bridge tests/submodule_cycle_test.sh
 
   go:
     runs-on: ubuntu-latest
