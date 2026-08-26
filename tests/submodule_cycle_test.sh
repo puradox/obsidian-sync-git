@@ -3,6 +3,10 @@
 # with `ob` (Obsidian Sync) and `commit-message` stubbed on PATH. No network,
 # no Docker. Run from anywhere: tests/submodule_cycle_test.sh
 #
+# The bridge under test is scripts/bridge.sh by default; set BRIDGE_BIN to a
+# command (e.g. a built cmd/bridge binary) to run the same scenarios against
+# it — every implementation must pass this file unchanged.
+#
 # Scenarios (one bridge cycle each):
 #   1. bootstrap an empty bridge from the outer remote (.gitmodules arrives)
 #   2. device edits inside the submodule land on ITS remote; the outer gitlink
@@ -113,7 +117,7 @@ run_cycle() {
   cycles=$((cycles + 1))
   printf '\n== cycle %d: %s\n' "$cycles" "$label"
   rm -f "$SUCCESS_MARKER"; : > "$OB_LOG"
-  bash "$SCRIPTS/bridge.sh" > "$T/cycle.log" 2>&1 || rc=$?
+  "${BRIDGE_BIN:-$SCRIPTS/bridge.sh}" > "$T/cycle.log" 2>&1 || rc=$?
   [ -z "${KEEP_TMP:-}" ] || cp "$T/cycle.log" "$T/cycle-$cycles.log"
   if [ "$rc" -ne "$want_rc" ]; then
     fail "exit code $rc (wanted $want_rc)"; sed 's/^/    | /' "$T/cycle.log"
