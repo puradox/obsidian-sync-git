@@ -117,6 +117,10 @@ services:
       # "Keeping the vault in a subfolder of the repo" in the README.
       # VAULT_SUBDIR: "vault"
 
+      # Deploy key for a folder shared as a git submodule (one per submodule,
+      # named after it) — see "Sharing a folder as a git submodule".
+      # GIT_SUBMODULE_DEPLOY_KEY_FILE_VAULT_COVE_QMS: "/keys/cove_qms_key"
+
       # AI commit messages, option A: any OpenAI-compatible provider
       # (Groq, Gemini, Ollama, …) — see "AI commit messages" in the README.
       # LLM_API_BASE: "https://api.groq.com/openai/v1"
@@ -208,6 +212,7 @@ Everything is configured in `docker-compose.yml` (step 4).
 | `CRON_SCHEDULE` | | `*/15 * * * *` | How often to sync, in [cron syntax](https://crontab.guru/) — the default means every 15 minutes. |
 | `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` | | `Obsidian Bridge` / `obsidian-bridge@localhost` | Name and email shown on the commits. |
 | `VAULT_SUBDIR` | | — (vault = repo root) | Keep the vault in a subfolder of the repository ([details](#keeping-the-vault-in-a-subfolder-of-the-repo)). Fixed once the bridge has run. |
+| `GIT_SUBMODULE_DEPLOY_KEY_FILE_<NAME>` | per submodule | — | Deploy key for a folder shared as a git submodule; `<NAME>` is derived from `.gitmodules` ([details](#sharing-a-folder-as-a-git-submodule)). |
 | `LLM_API_BASE` / `LLM_MODEL` / `LLM_API_KEY` | | — | AI commit messages via an OpenAI-compatible provider ([details](#ai-commit-messages)). |
 | `LLM_MAX_TOKENS` | | `4096` | Completion budget for that provider. On reasoning models this also covers the hidden "thinking" tokens — raise it if commits fall back to the plain label. |
 | `ANTHROPIC_API_KEY` | | — | AI commit messages via Anthropic instead ([details](#ai-commit-messages)). |
@@ -222,8 +227,9 @@ Everything is configured in `docker-compose.yml` (step 4).
 The secret settings — `OBSIDIAN_AUTH_TOKEN`, `OBSIDIAN_VAULT_PASSWORD`,
 `LLM_API_KEY`, `ANTHROPIC_API_KEY` — each also accept a `_FILE` variant that
 reads the value from a file instead: see
-[Security: Docker secrets](#security-docker-secrets). (`GIT_DEPLOY_KEY` with
-the key's *contents* also exists, but mounting the file is safer.)
+[Security: Docker secrets](#security-docker-secrets). (`GIT_DEPLOY_KEY` and
+`GIT_SUBMODULE_DEPLOY_KEY_<NAME>` with the key's *contents* also exist, but
+mounting the file is safer.)
 
 ### Volumes
 
@@ -343,6 +349,92 @@ your-repo/
 - **Decide up front:** like `VAULT_NAME`, this can't be changed once the
   bridge has run — you'd have to start over with fresh volumes.
 
+## Sharing a folder as a git submodule
+
+One folder of your vault can be its own git repository — a
+[submodule](https://git-scm.com/book/en/v2/Git-Tools-Submodules) — so you
+can share *just that folder* with someone who isn't on Obsidian Sync. They
+work in a clone of the folder's repository; you keep editing the notes in
+Obsidian; the bridge keeps the two in step with the same vault-wins rules as
+the rest of the vault. This works with or without `VAULT_SUBDIR`.
+
+**1. Add the submodule** in a separate clone of your repository (never inside
+the bridge's volume) and merge it through GitHub. The folder's repository may
+already contain notes, or be empty:
+
+```bash
+git submodule add git@github.com:coveqms/notes.git "vault/Cove QMS"
+git commit -m "Share Cove QMS as a submodule" && git push
+```
+
+**2. Give the bridge a deploy key for the folder's repository.** A GitHub
+deploy key only ever opens one repository, so each submodule needs its own,
+passed in a setting named after the submodule:
+
+- Take the submodule's name from `.gitmodules` — the `[submodule "…"]`
+  header, which is the path you added it at unless you chose otherwise:
+  `vault/Cove QMS`.
+- Upper-case it and replace every character that isn't `A–Z` or `0–9` with
+  `_`: `VAULT_COVE_QMS`.
+- That gives `GIT_SUBMODULE_DEPLOY_KEY_FILE_VAULT_COVE_QMS`. Create a key as
+  in [step 3](#3-create-a-deploy-key), add it to the folder's repository with
+  **Allow write access**, and mount it:
+
+```yaml
+    volumes:
+      - ./cove_qms_key:/keys/cove_qms_key:ro
+    environment:
+      GIT_SUBMODULE_DEPLOY_KEY_FILE_VAULT_COVE_QMS: "/keys/cove_qms_key"
+```
+
+Restart the bridge (`docker compose up -d`). If a key is missing, every cycle
+logs an `ALERT` naming the exact setting it expects. The `_FILE` variant works
+as a Docker secret like the others; `GIT_SUBMODULE_DEPLOY_KEY_<NAME>` with the
+key's contents also exists.
+
+Good to know:
+
+- **The folder's repository is pushed first.** Each cycle commits, rebases
+  and pushes every submodule in its own repository *before* the outer one, so
+  your main repository never points at a commit the folder's repository
+  doesn't have. A submodule problem (network, a clash it can't resolve) is
+  reported like any other failed cycle, but the rest of the vault still syncs.
+- **Your vault still wins.** Your collaborator's changes are pulled into the
+  folder on every cycle; if one clashes with a note you edited, your note wins
+  and an `ALERT` names the file, exactly as for pull requests. If the folder
+  already had notes on your devices when you added the submodule, the two are
+  merged the same way, your notes winning any clash; an empty folder simply
+  adopts the repository's content.
+- **The pointer follows your notes.** The commit your main repository records
+  for the folder always tracks the bridge's checkout. If a merged pull request
+  moves that pointer ahead, the folder fast-forwards to it; if the pointer and
+  your notes have diverged, your notes are re-applied on top (vault wins, with
+  an `ALERT`); it is never moved backwards.
+- **Without a key** the folder still syncs to your devices and is committed
+  locally, but nothing is pushed to its repository, the pointer stays where it
+  was, and an `ALERT` is logged each cycle. The cycle still succeeds.
+- **Only folders inside the vault** are handled; submodules elsewhere in the
+  repository are ignored. The branch is `main` unless `.gitmodules` sets
+  `branch = …` (`branch = .` also means `main`). Only `git@host:…` and
+  `ssh://` URLs can be routed to a key — an `https://` submodule is treated
+  like one without a key (committed locally, alerted, never pushed), so use
+  the SSH address — and, as for the main repository, only github.com's host
+  key is pinned.
+- **`.gitmodules` stays canonical.** Inside the container, each key is routed
+  through an SSH host alias (`bridge-submodule-…`) set on the folder's own
+  `origin` remote; other clones see the ordinary URL.
+- **Removing the submodule** (a merged pull request that drops it) detaches
+  the folder on the bridge: its notes stay in your vault as plain files and
+  nothing is deleted from your devices.
+- **The folder's `.git` never reaches your devices.** Obsidian Sync skips
+  every file and folder whose name starts with a dot (apart from `.obsidian`),
+  so the small `.git` file the bridge keeps in the folder stays on the bridge.
+  Verified in the sync engine the bridge runs (obsidian-headless 0.0.12): the
+  local scan skips dot-entries at every depth, and the file filter rejects
+  dot-paths before the "sync all other file types" setting is consulted.
+- Your collaborator should treat their clone like any git clone of a vault —
+  don't open it in Obsidian ([why](#dont-open-a-git-clone-as-an-obsidian-vault)).
+
 ## Protecting `main` on GitHub
 
 If automation (or other people) opens pull requests against your vault, enable
@@ -401,9 +493,10 @@ problem disappears. It costs one extra copy of your notes on disk, nothing else.
 ### Not everything in git reaches your devices
 
 Obsidian Sync carries Markdown plus common images, audio and video. Other
-extensions — `.txt`, `.json`, dotfiles like `.gitignore` — sync only when
-**"Sync all other file types"** is enabled in Obsidian's **Settings → Sync**,
-and every file has a maximum size that depends on your plan.
+extensions — `.txt`, `.json`, … — sync only when **"Sync all other file
+types"** is enabled in Obsidian's **Settings → Sync**; files and folders whose
+name starts with a dot (`.gitignore`, `.git`) never sync at all, apart from
+`.obsidian`; and every file has a maximum size that depends on your plan.
 
 Git has neither limit, so a file added by a pull request can sit in your
 repository and never reach a single device. The bridge can't warn you — from
@@ -430,6 +523,9 @@ Watch what's happening with `docker compose logs -f`;
 | `dubious ownership in repository` | Only with bind mounts: `chown -R 1000:1000` the folder (the bridge runs as user 1000). Named volumes (the default) are unaffected. |
 | `ALERT: rebase conflict … auto-resolved in favour of the vault` | Normal and handled — a merged pull request clashed with a note edit, so your note won and sync carried on; the PR's version is still in git history. See [How syncing works](#how-syncing-works). |
 | `ALERT: rebase conflict … could NOT be auto-resolved` (or it repeats every cycle) | A structural conflict the bridge won't auto-resolve (e.g. modify-vs-delete), or — on the very first sync — the repository wasn't empty. Resolve it on GitHub. |
+| `ALERT: submodule … no deploy key` | A folder shared as a submodule has no key, so it isn't being pushed. Set the setting the alert names — see [Sharing a folder as a git submodule](#sharing-a-folder-as-a-git-submodule). |
+| `ALERT: submodule … listed in .gitmodules but … is not a submodule pointer` | `.gitmodules` was edited by hand. Add the folder with `git submodule add` in a clone and merge that. |
+| `ALERT: submodule … origin/main moved its pointer` | A merged pull request pointed the folder at commits your notes didn't have; they were combined with your notes winning. Normal and handled. |
 | Container shows as `unhealthy` | No sync succeeded recently — check `docker compose logs` for the error. |
 | A file is on GitHub but never appears in Obsidian | Sync doesn't carry every file type or size — see [Not everything in git reaches your devices](#not-everything-in-git-reaches-your-devices). |
 | `git pull` in your own clone says *"local changes would be overwritten"* | You've opened that clone in Obsidian, so Sync and git are both writing it — see [Don't open a git clone as an Obsidian vault](#dont-open-a-git-clone-as-an-obsidian-vault). |
