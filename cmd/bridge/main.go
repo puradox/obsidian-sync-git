@@ -98,14 +98,35 @@ func (c config) vaultRel() string {
 }
 
 func main() {
-	os.Exit(int(run()))
+	// Read the heartbeat config up front so a malformed value is reported
+	// before the cycle rather than while reporting its result.
+	hb := heartbeatFromEnv()
+	start := time.Now()
+
+	// Deliberately NO signal handler. Reporting a SIGTERM on the way out is
+	// tempting — it would name a BRIDGE_CYCLE_TIMEOUT kill instead of just
+	// going quiet — but nothing here can cancel a cycle mid-flight, so the
+	// cycle would keep running (and pushing) after being told to die, the exit
+	// would be delayed by up to HEARTBEAT_TIMEOUT with the cycle lock released
+	// while git children are still live, and every `docker compose restart`
+	// would page whoever is on the other end of the monitor. A killed cycle
+	// sends nothing and the monitor notices the gap, which is the whole point
+	// of a heartbeat.
+	code, ran := run()
+	if ran {
+		hb.send(statusFor(code), cycleMessage(code), time.Since(start))
+	}
+	os.Exit(int(code))
 }
 
-func run() rc {
+// run reports the cycle's exit code, and whether a cycle actually ran. A tick
+// skipped because the previous one still holds the lock reports nothing:
+// nothing synced, and the cycle that IS running will report for itself.
+func run() (rc, bool) {
 	cfg, err := configFromEnv()
 	if err != nil {
 		logErr("%v", err)
-		return rcRetry
+		return rcRetry, true
 	}
 
 	// Serialize cycles: acquire an exclusive, non-blocking lock. If a previous
@@ -114,23 +135,23 @@ func run() rc {
 	lock, err := os.OpenFile(cfg.lockfile, os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		logErr("cannot open lockfile %s: %v", cfg.lockfile, err)
-		return rcRetry
+		return rcRetry, true
 	}
 	defer lock.Close()
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		if errors.Is(err, syscall.EWOULDBLOCK) {
 			logInfo("previous cycle still running; skipping this tick")
-			return rcOK
+			return rcOK, false
 		}
 		logErr("cannot lock %s: %v", cfg.lockfile, err)
-		return rcRetry
+		return rcRetry, true
 	}
 
 	if st, err := os.Stat(cfg.repoDir); err != nil || !st.IsDir() {
 		logErr("repo dir %s is missing", cfg.repoDir)
-		return rcRetry
+		return rcRetry, true
 	}
-	return (&cycle{cfg: cfg, outer: &repo{dir: cfg.repoDir}}).run()
+	return (&cycle{cfg: cfg, outer: &repo{dir: cfg.repoDir}}).run(), true
 }
 
 // cycle carries the per-run state the steps share.
@@ -160,7 +181,9 @@ func (c *cycle) run() rc {
 	c.subs = discoverSubmodules(c.cfg)
 	if len(c.subs) > 0 {
 		if err := configureSubmoduleRouting(c.cfg, c.subs); err != nil {
-			logErr("could not (re)write submodule ssh routing — pushes may use the wrong key: %v", err)
+			// Not fatal — the cycle carries on — so it must not become the
+			// reason a later, unrelated failure gets reported with.
+			logWarn("could not (re)write submodule ssh routing — pushes may use the wrong key: %v", err)
 		}
 		if !c.outer.fetchBranch("main", "") {
 			return rcRetry

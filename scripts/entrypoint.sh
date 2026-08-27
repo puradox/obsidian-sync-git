@@ -263,6 +263,9 @@ resolve_secret OBSIDIAN_AUTH_TOKEN
 resolve_secret OBSIDIAN_VAULT_PASSWORD
 resolve_secret ANTHROPIC_API_KEY
 resolve_secret LLM_API_KEY
+# The uptime monitor's push URL embeds its token, so it is a secret like the
+# rest — and must never be echoed, not even in an error message.
+resolve_secret HEARTBEAT_URL
 
 # Required configuration.
 : "${VAULT_NAME:?VAULT_NAME is required (the Obsidian Sync remote vault name or id)}"
@@ -296,6 +299,55 @@ case "$BRIDGE_CYCLE_TIMEOUT" in
 esac
 if [[ ! "$CRON_SCHEDULE" =~ ^\*/[0-9]+[[:space:]] ]] && [ -z "${HEALTH_STALE_SECONDS:-}" ]; then
   log "WARNING: CRON_SCHEDULE '$CRON_SCHEDULE' is not '*/N ...', so the healthcheck cannot derive a staleness threshold and falls back to 1800s — set HEALTH_STALE_SECONDS to ~2x your interval to avoid false-unhealthy"
+fi
+
+# Optional heartbeat to an external uptime monitor (Uptime Kuma's "Push"
+# monitor and anything shaped like it). Validated here so a typo is a startup
+# error rather than a monitor that silently never hears from us — which looks
+# exactly like a monitor that is working.
+HEARTBEAT_URL="${HEARTBEAT_URL:-}"
+# A _FILE secret authored on Windows leaves a trailing CR that resolve_secret's
+# $(cat) does not strip, and it would be percent-encoded into the token.
+HEARTBEAT_URL="${HEARTBEAT_URL#"${HEARTBEAT_URL%%[![:space:]]*}"}"
+HEARTBEAT_URL="${HEARTBEAT_URL%"${HEARTBEAT_URL##*[![:space:]]}"}"
+export HEARTBEAT_URL
+
+# Kept in step with heartbeat.go's strconv.Atoi + "> 0": if these two disagree,
+# startup reports success and then every cycle logs a complaint.
+export HEARTBEAT_TIMEOUT="${HEARTBEAT_TIMEOUT:-10}"
+case "$HEARTBEAT_TIMEOUT" in
+  ''|*[!0-9]*) die "HEARTBEAT_TIMEOUT must be a positive integer number of seconds, got: '$HEARTBEAT_TIMEOUT'" ;;
+esac
+# 10# so "00" and "08" are read as decimal rather than as invalid octal.
+[ "$(( 10#$HEARTBEAT_TIMEOUT ))" -ge 1 ] \
+  || die "HEARTBEAT_TIMEOUT must be a positive integer number of seconds, got: '$HEARTBEAT_TIMEOUT'"
+
+if [ -n "$HEARTBEAT_URL" ]; then
+  # NEVER interpolate the URL into these messages: it carries the push token.
+  case "$HEARTBEAT_URL" in
+    *[[:space:]]*) die "HEARTBEAT_URL must not contain whitespace (a newline or carriage return from a _FILE secret?)" ;;
+    *://*) ;;
+    *) die "HEARTBEAT_URL must be an http(s) URL — use the push URL your uptime monitor shows for the monitor" ;;
+  esac
+  # url.Parse lowercases the scheme, so accept the same spellings it does.
+  heartbeat_scheme="$(printf '%s' "${HEARTBEAT_URL%%://*}" | tr '[:upper:]' '[:lower:]')"
+  case "$heartbeat_scheme" in
+    https) ;;
+    http)  log "WARNING: HEARTBEAT_URL is http:// — the monitor's push token crosses the network in cleartext on every cycle; prefer https" ;;
+    *)     die "HEARTBEAT_URL must be an http(s) URL — use the push URL your uptime monitor shows for the monitor" ;;
+  esac
+  # Host only, for the log line below: the path is the token, and userinfo
+  # would be a password. Mirrors safeHost() in heartbeat.go.
+  heartbeat_host="${HEARTBEAT_URL#*://}"
+  heartbeat_host="${heartbeat_host%%/*}"
+  heartbeat_host="${heartbeat_host##*@}"
+  [ -n "$heartbeat_host" ] || die "HEARTBEAT_URL has no host"
+  if [ "$(( 10#$HEARTBEAT_TIMEOUT ))" -gt "$(( BRIDGE_CYCLE_TIMEOUT / 4 ))" ]; then
+    log "WARNING: HEARTBEAT_TIMEOUT (${HEARTBEAT_TIMEOUT}s) is large next to BRIDGE_CYCLE_TIMEOUT (${BRIDGE_CYCLE_TIMEOUT}s) — a slow monitor would eat into the cycle's budget"
+  fi
+  log "heartbeat enabled: reporting each cycle to ${heartbeat_host} (the monitor decides what is worth notifying about)"
+else
+  log "heartbeat disabled (no HEARTBEAT_URL) — a stopped bridge can only be noticed by reading these logs"
 fi
 
 # Optional: keep the vault in a subdirectory of the repo (e.g. VAULT_SUBDIR=vault)
