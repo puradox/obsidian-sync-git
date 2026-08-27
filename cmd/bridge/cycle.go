@@ -32,6 +32,7 @@ func (c *cycle) materialize(s *submodule) bool {
 			os.RemoveAll(gitdir) // an init a killed cycle never finished: start over
 		}
 		if err := os.MkdirAll(s.repo.dir, 0o755); err != nil {
+			logErr("submodule %s: could not create %s: %v", s.name, s.path, err)
 			return false
 		}
 		logInfo("submodule %s: initializing %s as a checkout of %s", s.name, s.path, s.url)
@@ -49,6 +50,7 @@ func (c *cycle) materialize(s *submodule) bool {
 	}
 	if _, err := s.repo.out("remote", "get-url", "origin"); err != nil {
 		if s.repo.quiet("remote", "add", "origin", s.url) != nil {
+			logErr("submodule %s: could not set its origin to %s", s.name, s.url)
 			return false
 		}
 	}
@@ -191,6 +193,7 @@ func (c *cycle) unstageUnpushedGitlinks() bool {
 		}
 		if c.outer.indexIsGitlink(s.path) && c.outer.refPresent("HEAD:"+s.path) {
 			if c.outer.quiet("reset", "-q", "--", s.path) != nil {
+				logErr("%s: could not un-stage its unpushed pointer — deferring to next tick", s.ctx())
 				return false
 			}
 		}
@@ -249,13 +252,17 @@ func (c *cycle) refreshSubmodulePointers() rc {
 // everything else went through.
 func (c *cycle) submoduleExitCode() rc {
 	worst := rcOK
+	name := ""
 	for _, s := range c.subs {
 		if s.rc != rcLocalOnly && s.rc > worst {
-			worst = s.rc
+			worst, name = s.rc, s.name
 		}
 	}
 	if worst != rcOK {
-		logErr("%d-class failure in a submodule this cycle (see above) — the outer vault still synced", worst)
+		// logWarn, not logErr: this is a summary of a failure already logged
+		// in full above, and capturing it would leave the heartbeat reporting
+		// "see above" instead of the reason.
+		logWarn("%d-class failure in submodule %s this cycle (see above) — the outer vault still synced", worst, name)
 	}
 	return worst
 }
@@ -287,6 +294,7 @@ func (c *cycle) repairSubmoduleTransitions(pre string) bool {
 
 	list, err := c.outer.out("ls-files", "-s", "-z")
 	if err != nil {
+		logErr("could not list the index to check for submodule changes: %v — deferring to next tick", err)
 		return false
 	}
 	for _, entry := range strings.Split(list, "\x00") {
@@ -306,6 +314,7 @@ func (c *cycle) repairSubmoduleTransitions(pre string) bool {
 		}
 		logAlert("submodule at %s: origin/main turned this folder into a submodule; restoring its notes from the previous commit so nothing is deleted from your devices — they become the folder's first commit next cycle.", path)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
+			logErr("could not recreate %s to restore its notes: %v — deferring to next tick", path, err)
 			return false
 		}
 		if err := c.restoreTree(pre, path); err != nil {
@@ -322,7 +331,7 @@ func (c *cycle) repairSubmoduleTransitions(pre string) bool {
 	if len(c.subs) == 0 && !isDir(modules) {
 		return true
 	}
-	return filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -352,7 +361,12 @@ func (c *cycle) repairSubmoduleTransitions(pre string) bool {
 			return err
 		}
 		return filepath.SkipDir
-	}) == nil
+	})
+	if err != nil {
+		logErr("could not walk the vault to repair submodule folders: %v — deferring to next tick", err)
+		return false
+	}
+	return true
 }
 
 // removeModuleGitdir deletes the git dir a submodule's `.git` file (at

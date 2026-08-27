@@ -132,6 +132,10 @@ services:
       # ANTHROPIC_API_KEY: "your-api-key"
       # ANTHROPIC_MODEL: "claude-haiku-4-5"
 
+      # Report every cycle to an uptime monitor, which tells you when syncing
+      # breaks — or stops entirely. See "Monitoring with Uptime Kuma".
+      # HEARTBEAT_URL: "https://kuma.example.com/api/push/AbCdEf1234"
+
       # Seconds without a successful sync before Docker reports "unhealthy".
       # Set to ~2x your interval if CRON_SCHEDULE isn't every-N-minutes.
       # HEALTH_STALE_SECONDS: "1800"
@@ -194,6 +198,9 @@ stop watching). Open your GitHub repository — your notes are there.
 - **Conflicts are safe.** If a merged pull request clashes with a note you
   edited, your vault wins automatically, sync keeps going, nothing is lost, and
   the logs alert you. Details: [How syncing works](#how-syncing-works).
+- **You don't have to watch the logs.** Point the bridge at an uptime monitor
+  and it reports every cycle, so a broken — or stopped — sync finds you:
+  [Monitoring with Uptime Kuma](#monitoring-with-uptime-kuma).
 - **Changing a setting:** edit `docker-compose.yml`, then run
   `docker compose up -d` again.
 - **Updating:** `docker compose pull && docker compose up -d`.
@@ -217,6 +224,8 @@ Everything is configured in `docker-compose.yml` (step 4).
 | `LLM_MAX_TOKENS` | | `4096` | Completion budget for that provider. On reasoning models this also covers the hidden "thinking" tokens — raise it if commits fall back to the plain label. |
 | `ANTHROPIC_API_KEY` | | — | AI commit messages via Anthropic instead ([details](#ai-commit-messages)). |
 | `ANTHROPIC_MODEL` | | `claude-haiku-4-5` | Model for the Anthropic option. |
+| `HEARTBEAT_URL` | | — | Report each cycle to an uptime monitor's push URL ([details](#monitoring-with-uptime-kuma)). Its token is in the URL, so it's a secret and is never logged. |
+| `HEARTBEAT_TIMEOUT` | | `10` | Seconds to wait for that monitor. A monitor that is slow or down never affects the sync cycle. |
 | `HEALTH_STALE_SECONDS` | | 2× the sync interval | Seconds without a successful sync before Docker reports `unhealthy`. Set it (≈2× your interval) if `CRON_SCHEDULE` isn't every-N-minutes. |
 | `RUN_ON_START` | | `true` | Sync once immediately when the container starts. |
 | `OB_SYNC_TIMEOUT` | | `300` | Seconds a single `ob sync` may run before it's killed and retried next tick. Guards against the sync engine stalling on a half-open connection. Raise it only for very large vaults. |
@@ -225,7 +234,7 @@ Everything is configured in `docker-compose.yml` (step 4).
 | `OBSIDIAN_DEVICE_NAME` | | — | Device name shown in Obsidian Sync's version history. |
 
 The secret settings — `OBSIDIAN_AUTH_TOKEN`, `OBSIDIAN_VAULT_PASSWORD`,
-`LLM_API_KEY`, `ANTHROPIC_API_KEY` — each also accept a `_FILE` variant that
+`LLM_API_KEY`, `ANTHROPIC_API_KEY`, `HEARTBEAT_URL` — each also accept a `_FILE` variant that
 reads the value from a file instead: see
 [Security: Docker secrets](#security-docker-secrets). (`GIT_DEPLOY_KEY` and
 `GIT_SUBMODULE_DEPLOY_KEY_<NAME>` with the key's *contents* also exist, but
@@ -282,10 +291,84 @@ volumes:
 
 The deploy key becomes a secret too, replacing the `./deploy_key:/keys/…`
 mount from step 4. The same pattern works for `OBSIDIAN_VAULT_PASSWORD_FILE`,
-`LLM_API_KEY_FILE`, and `ANTHROPIC_API_KEY_FILE`.
+`LLM_API_KEY_FILE`, `ANTHROPIC_API_KEY_FILE`, and `HEARTBEAT_URL_FILE`.
 
 To rotate a secret, update the file (for the deploy key, also swap the public
 key on GitHub), then run `docker compose restart`. Secrets are never logged.
+
+## Monitoring with Uptime Kuma
+
+Problems show up in `docker compose logs`, which means you find them when you
+go looking. Point the bridge at an uptime monitor and it tells you instead.
+
+In Uptime Kuma: **Add New Monitor → Monitor Type: Push**, copy the Push URL it
+shows you, and attach your Pushover (or any other) notification to it. Then:
+
+```yaml
+      HEARTBEAT_URL: "https://kuma.example.com/api/push/AbCdEf1234"
+```
+
+That URL contains the monitor's token, so it's a secret: it also takes the
+`_FILE` variant from [Docker secrets](#security-docker-secrets). The bridge
+never writes it to the logs — not in an error, not from a response body — and
+never follows a redirect away from it, which would hand the token to whichever
+host the redirect names. Prefer `https`; over plain `http` the token crosses
+the network in the clear, and the bridge says so at startup.
+
+### The notification names the actual problem
+
+The bridge pushes `up` after a completed cycle and `down` after a failed one —
+and sends the error along with it, so the alert says what broke rather than
+just turning red:
+
+> **[Obsidian Bridge] [🔴 Down]** ob sync (device pull) timed out after 300s
+> (stalled sync-server connection?) — killed; deferring to next tick
+
+| Cycle outcome | Reported | The message says |
+|---|---|---|
+| Completed | `up` | `cycle complete`, plus what was committed |
+| Conflict auto-resolved (your vault won) | `up` | which note overrode a merged change — nothing is broken, but you may want to re-apply it upstream |
+| Submodule with no deploy key | `up` | that it syncs to your devices but isn't being pushed |
+| Network or sync-engine failure | `down` | the step that failed and its error |
+| A conflict that needs you | `down` | what couldn't be auto-resolved |
+| Killed by `BRIDGE_CYCLE_TIMEOUT`, or the container stops | *nothing* | — the monitor notices the missing beat, which is what a heartbeat is for |
+| Tick skipped (previous cycle still running) | *nothing* | — the cycle that IS running reports for itself |
+
+The cycle's duration is sent as the monitor's "ping" value, so Kuma graphs how
+long syncing takes. That's a useful early warning well before anything fails.
+
+### The monitor decides what's worth waking you for
+
+The bridge deliberately has no notification settings of its own — Kuma already
+does that job, and does it in a UI:
+
+- **Retries** is your failure threshold. `0` pages you on the very first failed
+  cycle; `2` waits for three in a row. A single failure is often a network blip
+  the next tick fixes, so `1` or `2` is usually the kinder setting.
+- **Resend Interval** decides whether a problem that *stays* broken keeps
+  reminding you. Kuma only notifies on changes (up→down, down→up), so without
+  this you get exactly one notification per outage.
+- **Heartbeat Interval** should be comfortably longer than `CRON_SCHEDULE`, or
+  a healthy-but-idle bridge looks overdue. Roughly 2× your sync interval.
+
+### It also catches the bridge not running at all
+
+This is the real gain over reading logs. If the container is stopped, the
+Docker daemon is down, or the machine is off, the pushes simply stop and Kuma
+alerts on the silence — something nothing *inside* the container could ever
+report.
+
+One limit worth knowing: if Kuma runs on the same server as the bridge, it
+can't tell you that server is off, because it's off too. Closing that last gap
+needs the monitor to live somewhere else.
+
+### Alternative: the Docker Container monitor
+
+Kuma can instead watch the container's own healthcheck, which is green only if
+a cycle succeeded within `HEALTH_STALE_SECONDS` — no `HEARTBEAT_URL` needed.
+The trade-offs: Kuma needs Docker socket access (effectively root on the host),
+it takes up to ~45 minutes to notice with the default settings, and it can't
+tell you why. Worth it if you'd rather not give the bridge an outbound URL.
 
 ## AI commit messages
 
@@ -526,6 +609,9 @@ Watch what's happening with `docker compose logs -f`;
 | `ALERT: submodule … no deploy key` | A folder shared as a submodule has no key, so it isn't being pushed. Set the setting the alert names — see [Sharing a folder as a git submodule](#sharing-a-folder-as-a-git-submodule). |
 | `ALERT: submodule … listed in .gitmodules but … is not a submodule pointer` | `.gitmodules` was edited by hand. Add the folder with `git submodule add` in a clone and merge that. |
 | `ALERT: submodule … origin/main moved its pointer` | A merged pull request pointed the folder at commits your notes didn't have; they were combined with your notes winning. Normal and handled. |
+| `heartbeat rejected ... (HTTP 404 ...)` | The push URL is wrong, or its monitor was deleted or **paused** — a paused monitor looks identical to a healthy quiet one. |
+| `heartbeat to ... failed` | The bridge can't reach your monitor. Syncing is unaffected; only the reporting is. |
+| Uptime Kuma flaps between up and down | Its **Heartbeat Interval** is too close to `CRON_SCHEDULE` — a healthy bridge is idle between cycles. Use roughly 2× your sync interval. |
 | Container shows as `unhealthy` | No sync succeeded recently — check `docker compose logs` for the error. |
 | A file is on GitHub but never appears in Obsidian | Sync doesn't carry every file type or size — see [Not everything in git reaches your devices](#not-everything-in-git-reaches-your-devices). |
 | `git pull` in your own clone says *"local changes would be overwritten"* | You've opened that clone in Obsidian, so Sync and git are both writing it — see [Don't open a git clone as an Obsidian vault](#dont-open-a-git-clone-as-an-obsidian-vault). |

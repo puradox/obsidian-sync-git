@@ -177,6 +177,11 @@ func (r *repo) commitWorkingTree(ctx string, afterAdd func() bool) bool {
 		return false
 	}
 	subject, _, _ := strings.Cut(msg, "\n")
+	if ctx == "" {
+		// The vault's own commit subject; the heartbeat reports it so a
+		// successful cycle says what it actually synced.
+		lastCommit = subject
+	}
 	logInfo("committed %s changes: %s", ctxOr(ctx), subject)
 	return true
 }
@@ -268,7 +273,7 @@ func (r *repo) rebaseOnto(upstream, ctx string) rc {
 	// A real conflict. Abort the failed attempt, then replay resolving in
 	// favour of the vault so sync self-heals instead of stopping.
 	if !r.abortRebaseClean() {
-		logAlert("rebase conflict%s AND the abort failed — repo may be left mid-rebase; run 'git rebase --abort' in %s.", ctxOn(ctx), r.dir)
+		logConflictAlert("rebase conflict%s AND the abort failed — repo may be left mid-rebase; run 'git rebase --abort' in %s.", ctxOn(ctx), r.dir)
 		return rcConflict
 	}
 	if err := r.run("rebase", "-X", "theirs", upstream); err != nil && !r.rebaseInProgress() {
@@ -296,9 +301,9 @@ func (r *repo) rebaseOnto(upstream, ctx string) rc {
 	// Even a vault-wins replay couldn't apply (e.g. a note edited here but
 	// deleted upstream): don't leave a half-done rebase — abort clean and alert.
 	if r.abortRebaseClean() {
-		logAlert("rebase conflict%s that could NOT be auto-resolved even in favour of the vault (e.g. a file modified on one side and deleted on the other). Repo left clean, nothing pushed; resolve it upstream. On a FIRST cycle see 'The first sync' in the README.", ctxOn(ctx))
+		logConflictAlert("rebase conflict%s that could NOT be auto-resolved even in favour of the vault (e.g. a file modified on one side and deleted on the other). Repo left clean, nothing pushed; resolve it upstream. On a FIRST cycle see 'The first sync' in the README.", ctxOn(ctx))
 	} else {
-		logAlert("rebase conflict%s AND the abort failed — repo may be left mid-rebase; run 'git rebase --abort' in %s.", ctxOn(ctx), r.dir)
+		logConflictAlert("rebase conflict%s AND the abort failed — repo may be left mid-rebase; run 'git rebase --abort' in %s.", ctxOn(ctx), r.dir)
 	}
 	return rcConflict
 }
