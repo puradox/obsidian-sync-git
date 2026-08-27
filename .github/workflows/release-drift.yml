@@ -1,0 +1,144 @@
+name: Release drift
+
+# The tag is the single source of truth for a release (see release.yml). That
+# is deliberate — but it means a merged change stays invisible to anyone
+# pulling the image until somebody remembers to cut one, and "somebody
+# remembers" is not a mechanism. This job is the mechanism: while main is ahead
+# of the newest tag, one issue stays open naming what is unreleased and the
+# exact command to release it. Cut the tag and it closes itself.
+#
+# Why this rather than releasing automatically on merge: inferring the version
+# from commit subjects needs them to be conventional, and this repo's are only
+# about two thirds so. The two largest changes it has ever shipped — the
+# submodule support (#9) and the Go port (#10) — both landed with plain
+# subjects that a semver bot would read as "nothing to release". A wrong
+# automatic version is worse than a reminder, so this suggests and lets a
+# human decide.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']       # a release closes the issue on its way through
+  schedule:
+    - cron: '0 16 * * 1'   # Mondays: catch a release that was merged and forgotten
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: release-drift
+  cancel-in-progress: false
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0      # tags and full history, for the comparison below
+          fetch-tags: true
+          ref: main           # a tag push checks out the tag otherwise
+
+      - name: Compare main with the newest release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: Unreleased changes on main
+        run: |
+          set -euo pipefail
+
+          latest="$(git tag -l 'v*' --sort=-v:refname | head -n1 || true)"
+          if [ -n "$latest" ]; then
+            range="${latest}..HEAD"
+          else
+            # No release yet: everything is unreleased.
+            range="HEAD"
+          fi
+          count="$(git rev-list --count "$range")"
+
+          # --- nothing unreleased: close the issue if one is open -------------
+          if [ "$count" -eq 0 ]; then
+            echo "main is level with ${latest} — no drift."
+            open="$(gh issue list --state open --limit 100 --json number,title \
+                      --jq "[.[] | select(.title == \"${TITLE}\")][0].number // empty")"
+            if [ -n "$open" ]; then
+              gh issue comment "$open" --body "Released in \`${latest}\` — closing."
+              gh issue close "$open"
+            fi
+            exit 0
+          fi
+
+          # --- classify what is waiting ---------------------------------------
+          subjects="$(git log --format='%s' "$range")"
+          conventional='^(feat|fix|docs|chore|refactor|test|perf|build|ci|style)(\(.+\))?!?:'
+
+          breaking=0
+          if git log --format='%s%n%b' "$range" | grep -qE '^BREAKING[ -]CHANGE|^[a-z]+(\(.+\))?!:'; then
+            breaking=1
+          fi
+          feats="$(printf '%s\n' "$subjects"  | grep -cE '^feat(\(.+\))?!?:' || true)"
+          fixes="$(printf '%s\n' "$subjects"  | grep -cE '^fix(\(.+\))?!?:'  || true)"
+          unclassified="$(printf '%s\n' "$subjects" | grep -cvE "$conventional" || true)"
+
+          # --- suggest the next version ---------------------------------------
+          # Semver, with the pre-1.0 rule that a breaking change bumps the minor
+          # rather than the major (0.x makes no stability promise). That matches
+          # every release cut so far: 0.2.0 carried the Go port and submodules.
+          base="${latest:-v0.0.0}"
+          ver="${base#v}"
+          major="${ver%%.*}"; rest="${ver#*.}"
+          minor="${rest%%.*}"; patch="${rest#*.}"
+          if [ "$breaking" -eq 1 ] && [ "$major" -gt 0 ]; then
+            major=$(( major + 1 )); minor=0; patch=0
+          elif [ "$breaking" -eq 1 ] || [ "$feats" -gt 0 ]; then
+            minor=$(( minor + 1 )); patch=0
+          else
+            patch=$(( patch + 1 ))
+          fi
+          next="v${major}.${minor}.${patch}"
+          sha="$(git rev-parse HEAD)"
+
+          # --- build the issue body -------------------------------------------
+          # The backticks below are Markdown, inside single quotes on purpose.
+          # SC2016 reads them as command substitution that won't expand.
+          # shellcheck disable=SC2016
+          {
+            printf '`main` is **%s commit(s)** ahead of `%s`, so the newest image on GHCR does not contain them.\n\n' \
+              "$count" "${latest:-(no release yet)}"
+            printf 'Unreleased:\n\n'
+            git log --format='- %s (`%h`)' "$range"
+            printf '\n**Suggested next version: `%s`**' "$next"
+            if [ "$breaking" -eq 1 ]; then
+              printf ' — a breaking change is in there.\n'
+            elif [ "$feats" -gt 0 ]; then
+              printf ' — %s feature commit(s).\n' "$feats"
+            else
+              printf ' — %s fix(es), no features.\n' "$fixes"
+            fi
+            if [ "$unclassified" -gt 0 ]; then
+              printf '\n> [!WARNING]\n'
+              printf '> %s of these subjects are not Conventional Commits, so they were not classified.\n' "$unclassified"
+              printf '> This repo has form here: the submodule support (#9) and the Go port (#10) both\n'
+              printf '> landed with plain subjects. Read the list before trusting the suggestion — it\n'
+              printf '> may be a patch bump for what is really a feature.\n'
+            fi
+            printf '\nTo release:\n\n'
+            printf '```sh\n'
+            printf 'git tag -a %s %s -m "%s: <what changed>"\n' "$next" "${sha:0:7}" "$next"
+            printf 'git push origin %s\n' "$next"
+            printf '```\n\n'
+            printf 'That one push cuts the GitHub Release and pushes the multi-arch image.\n'
+            printf 'This issue closes itself on the next run.\n\n'
+            printf '<sub>Deployments pin by tag, so nothing picks these up until one exists.</sub>\n'
+          } > body.md
+
+          # --- open it, or update the one already open -------------------------
+          open="$(gh issue list --state open --limit 100 --json number,title \
+                    --jq "[.[] | select(.title == \"${TITLE}\")][0].number // empty")"
+          if [ -n "$open" ]; then
+            gh issue edit "$open" --body-file body.md
+            echo "updated issue #${open}"
+          else
+            gh issue create --title "$TITLE" --body-file body.md
+          fi
