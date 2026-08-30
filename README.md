@@ -25,7 +25,7 @@ repository.**
 
 A small Docker container checks [Obsidian Sync](https://obsidian.md/sync) every
 15 minutes, commits whatever changed to GitHub, and sends anything merged on
-GitHub back out to your devices.
+GitHub back out to your devices — usually within a minute of the merge.
 
 - **Backup and history** — every version of every note, browsable on GitHub.
 - **Safe automation** — tools like Claude Code can propose note edits as pull
@@ -109,6 +109,11 @@ services:
       # The default means every 15 minutes.
       # CRON_SCHEDULE: "*/15 * * * *"
 
+      # Minutes between checks for new commits on GitHub. A merged pull request
+      # then reaches your devices within a minute instead of waiting out the
+      # schedule above. "0" turns it off.
+      # POLL_INTERVAL: "1"
+
       # Name and email shown on the commits.
       # GIT_AUTHOR_NAME: "Obsidian Bridge"
       # GIT_AUTHOR_EMAIL: "obsidian-bridge@localhost"
@@ -185,7 +190,8 @@ docker compose logs -f
 Within a minute or two you should see **`cycle complete`** (press `Ctrl+C` to
 stop watching). Open your GitHub repository — your notes are there.
 
-**Done.** It now syncs on its own every 15 minutes. Something wrong? See
+**Done.** It now syncs on its own every 15 minutes, and picks up merged pull
+requests within a minute. Something wrong? See
 [Troubleshooting](#troubleshooting).
 
 ## Good to know
@@ -216,7 +222,9 @@ Everything is configured in `docker-compose.yml` (step 4).
 | `OBSIDIAN_AUTH_TOKEN` | ✅ | — | The Obsidian token from step 2. |
 | `GIT_DEPLOY_KEY_FILE` | ✅ | — | Path of the mounted deploy key (`/keys/deploy_key` in the example). |
 | `OBSIDIAN_VAULT_PASSWORD` | E2EE vaults only | — | The vault's encryption password. Ignored for normal vaults. |
-| `CRON_SCHEDULE` | | `*/15 * * * *` | How often to sync, in [cron syntax](https://crontab.guru/) — the default means every 15 minutes. |
+| `CRON_SCHEDULE` | | `*/15 * * * *` | How often to do a full sync, in [cron syntax](https://crontab.guru/) — the default means every 15 minutes. Merged pull requests normally arrive sooner than this; see `POLL_INTERVAL`. |
+| `POLL_INTERVAL` | | `1` | Minutes between checks for new commits on GitHub, so a merged pull request doesn't wait out `CRON_SCHEDULE` ([details](#how-syncing-works)). A check is one lightweight request that transfers nothing; only an actual change starts a sync. `0` turns it off. |
+| `SYNC_INTERVAL` | | derived from `CRON_SCHEDULE` | Length of the full-sync interval in seconds. Only needed if `CRON_SCHEDULE` isn't every-N-minutes — without it, `POLL_INTERVAL` can't be used. |
 | `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` | | `Obsidian Bridge` / `obsidian-bridge@localhost` | Name and email shown on the commits. |
 | `VAULT_SUBDIR` | | — (vault = repo root) | Keep the vault in a subfolder of the repository ([details](#keeping-the-vault-in-a-subfolder-of-the-repo)). Fixed once the bridge has run. |
 | `GIT_SUBMODULE_DEPLOY_KEY_FILE_<NAME>` | per submodule | — | Deploy key for a folder shared as a git submodule; `<NAME>` is derived from `.gitmodules` ([details](#sharing-a-folder-as-a-git-submodule)). |
@@ -542,6 +550,27 @@ Every 15 minutes (or your `CRON_SCHEDULE`) the bridge runs one cycle:
 4. Push everything to GitHub.
 5. Send the merged changes back out to your devices (Obsidian Sync).
 
+**Merged pull requests don't wait for the schedule.** Once a minute the bridge
+asks GitHub whether anything new has landed on `main`. That question is a single
+lightweight request that transfers no files, so it's cheap enough to ask
+often — and if the answer is no, which it usually is, the bridge does nothing at
+all. If the answer is yes, it runs the cycle above straight away, so a merge
+normally reaches your devices within a minute. `POLL_INTERVAL` changes how often
+it asks; `0` goes back to syncing on the schedule only.
+
+**Note changes travel on the schedule, and can't be sped up the same way.**
+There's no equivalent cheap question to ask about your devices: Obsidian Sync
+can't tell the bridge that a note was edited, so the only way to find out is to
+ask it for the changes themselves — and that request *is* the expensive step the
+schedule exists to space out. If you want edits made in Obsidian to reach GitHub
+faster, shorten `CRON_SCHEDULE`.
+
+**To sync right now**, whatever the schedule says:
+
+```bash
+docker compose exec obsidian-bridge bridge --now
+```
+
 Two rules keep this safe:
 
 - **Your vault always wins.** Edits made in Obsidian take priority over
@@ -612,6 +641,8 @@ Watch what's happening with `docker compose logs -f`;
 | `heartbeat rejected ... (HTTP 404 ...)` | The push URL is wrong, or its monitor was deleted or **paused** — a paused monitor looks identical to a healthy quiet one. |
 | `heartbeat to ... failed` | The bridge can't reach your monitor. Syncing is unaffected; only the reporting is. |
 | Uptime Kuma flaps between up and down | Its **Heartbeat Interval** is too close to `CRON_SCHEDULE` — a healthy bridge is idle between cycles. Use roughly 2× your sync interval. |
+| Startup log says *"adaptive polling needs the sync interval in seconds"* | Your `CRON_SCHEDULE` isn't `*/N * * * *`, so the bridge can't tell how long a full interval is. Set `SYNC_INTERVAL` to that length in seconds. |
+| Merged pull requests still take up to 15 minutes | Checking is off — either `POLL_INTERVAL: "0"`, or the startup log says why. Syncing itself is unaffected. |
 | Container shows as `unhealthy` | No sync succeeded recently — check `docker compose logs` for the error. |
 | A file is on GitHub but never appears in Obsidian | Sync doesn't carry every file type or size — see [Not everything in git reaches your devices](#not-everything-in-git-reaches-your-devices). |
 | `git pull` in your own clone says *"local changes would be overwritten"* | You've opened that clone in Obsidian, so Sync and git are both writing it — see [Don't open a git clone as an Obsidian vault](#dont-open-a-git-clone-as-an-obsidian-vault). |

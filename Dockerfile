@@ -97,6 +97,7 @@ COPY github_known_hosts                      /opt/bridge/github_known_hosts
 # exports — resolve the same state paths and schedule as the bridge itself.
 ENV XDG_CONFIG_HOME=/config \
     SUCCESS_MARKER=/config/.last-success \
+    ATTEMPT_MARKER=/config/.last-attempt \
     CRON_SCHEDULE="*/15 * * * *"
 
 USER obsidian
@@ -105,7 +106,9 @@ WORKDIR /vault
 VOLUME ["/vault", "/config"]
 
 # Unhealthy if no bridge cycle has succeeded within the staleness threshold
-# (2x the cron interval for */N schedules, else 1800s, or HEALTH_STALE_SECONDS).
+# (2x SYNC_INTERVAL or the cron interval for */N schedules, else 1800s, or
+# HEALTH_STALE_SECONDS). Adaptive polling ticks more often than CRON_SCHEDULE
+# but only writes the marker on a real cycle, so the threshold is unaffected.
 # start-period must cover the RUN_ON_START initial cycle, which may run for the
 # default BRIDGE_CYCLE_TIMEOUT (900s) plus the 30s kill grace; anyone raising
 # OB_SYNC_TIMEOUT/BRIDGE_CYCLE_TIMEOUT should extend start_period in compose too.

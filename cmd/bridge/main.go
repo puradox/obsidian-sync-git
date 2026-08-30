@@ -1,5 +1,12 @@
 // bridge runs one full Obsidian Sync <-> git bridge cycle. entrypoint.sh
-// runs it once on start and then on CRON_SCHEDULE via supercronic.
+// runs it once on start (as `bridge --now`) and then on every supercronic tick.
+//
+// A tick is not necessarily a cycle. With adaptive polling on (SYNC_INTERVAL
+// set — see schedule.go) supercronic ticks every POLL_INTERVAL minutes and
+// most ticks only run a `git ls-remote` probe and exit, so a merged pull
+// request reaches the vault within a minute instead of waiting out
+// CRON_SCHEDULE. A skipped tick reports nothing to the uptime monitor: it is
+// not a cycle, and the heartbeat's cadence stays keyed to CRON_SCHEDULE.
 //
 // The ENTIRE cycle runs under a non-blocking flock on a container-local
 // lockfile (NOT on the /config volume — advisory locks can be unreliable on
@@ -56,8 +63,10 @@ type config struct {
 	repoDir       string        // git repo working tree (all git commands)
 	vaultDir      string        // ob sync target; the repo root or VAULT_SUBDIR within it
 	successMarker string        // written on success; read by the healthcheck
+	attemptMarker string        // written when a cycle STARTS; the adaptive-polling floor timer
 	lockfile      string        // container-local flock target
 	obSyncTimeout time.Duration // OB_SYNC_TIMEOUT
+	syncInterval  time.Duration // SYNC_INTERVAL: floor between cycles; 0 = every tick is a cycle
 	home          string        // where deploy keys and ssh config live
 }
 
@@ -65,6 +74,7 @@ func configFromEnv() (config, error) {
 	c := config{
 		repoDir:       envOr("REPO_DIR", "/vault"),
 		successMarker: envOr("SUCCESS_MARKER", "/config/.last-success"),
+		attemptMarker: envOr("ATTEMPT_MARKER", "/config/.last-attempt"),
 		lockfile:      envOr("BRIDGE_LOCKFILE", "/tmp/obsidian-bridge.lock"),
 		obSyncTimeout: 300 * time.Second,
 		home:          os.Getenv("HOME"),
@@ -76,6 +86,16 @@ func configFromEnv() (config, error) {
 			return c, fmt.Errorf("OB_SYNC_TIMEOUT must be an integer number of seconds, got %q", s)
 		}
 		c.obSyncTimeout = time.Duration(n) * time.Second
+	}
+	// entrypoint.sh decides whether adaptive polling is possible at all and
+	// passes the resulting floor here; anything <= 0 (including unset) means
+	// every tick runs a full cycle, as it did before adaptive polling.
+	if s := os.Getenv("SYNC_INTERVAL"); s != "" {
+		n, err := strconv.Atoi(s)
+		if err != nil {
+			return c, fmt.Errorf("SYNC_INTERVAL must be an integer number of seconds, got %q", s)
+		}
+		c.syncInterval = time.Duration(n) * time.Second
 	}
 	return c, nil
 }
@@ -123,6 +143,14 @@ func main() {
 // skipped because the previous one still holds the lock reports nothing:
 // nothing synced, and the cycle that IS running will report for itself.
 func run() (rc, bool) {
+	force, ok := parseArgs(os.Args[1:])
+	if !ok {
+		// Not a cycle outcome — a mistyped command line. Reported by exit
+		// status only: sending the uptime monitor a `down` for this would page
+		// whoever is on the other end over someone's typo in a shell.
+		return rcRetry, false
+	}
+
 	cfg, err := configFromEnv()
 	if err != nil {
 		logErr("%v", err)
@@ -151,7 +179,55 @@ func run() (rc, bool) {
 		logErr("repo dir %s is missing", cfg.repoDir)
 		return rcRetry, true
 	}
-	return (&cycle{cfg: cfg, outer: &repo{dir: cfg.repoDir}}).run(), true
+
+	// Adaptive polling: on most ticks the only work is one ls-remote, and the
+	// answer is "nothing new". Decided under the lock so a probe is never paid
+	// for a tick that a running cycle would have skipped anyway.
+	outer := &repo{dir: cfg.repoDir}
+	trigger := decideCycle(time.Now(), markerTime(cfg.attemptMarker), markerTime(cfg.successMarker),
+		cfg.syncInterval, force, func() (bool, error) {
+			return outer.remoteMoved("main", probeTimeout)
+		})
+	if trigger == triggerNone {
+		// Deliberately silent: this is the common case, and at a one-minute
+		// tick a line here would put ~1400 of them a day between the entries
+		// that matter in `docker logs`.
+		return rcOK, false
+	}
+	logInfo("starting cycle (%s)", trigger)
+	cfg.markAttempt()
+
+	return (&cycle{cfg: cfg, outer: outer}).run(), true
+}
+
+// parseArgs reads the one flag the bridge takes, --now: cycle regardless of
+// the adaptive-polling gate. RUN_ON_START passes it so "sync once when the
+// container starts" keeps meaning that across a restart landing inside the
+// floor interval, and it is the documented way to sync by hand:
+//
+//	docker compose exec obsidian-bridge bridge --now
+//
+// It skips the gate, never the lock — a forced cycle still cannot overlap a
+// running one. Anything else is rejected rather than ignored, so a typo does
+// not quietly become a tick that decides to do nothing.
+func parseArgs(args []string) (force, ok bool) {
+	for _, a := range args {
+		if a != "--now" {
+			logErr("unknown argument %q — the only flag is --now (force a cycle now, ignoring the poll schedule)", a)
+			return false, false
+		}
+		force = true
+	}
+	return force, true
+}
+
+// markAttempt records that a cycle is starting. Not fatal if it fails: the
+// marker is a timer, not state the cycle reads. But without it every later
+// tick reads "overdue" and starts a cycle, so it is worth a line in the log.
+func (c config) markAttempt() {
+	if err := os.WriteFile(c.attemptMarker, []byte(timestamp()+"\n"), 0o644); err != nil {
+		logWarn("could not write %s (volume permissions?) — every tick will run a full cycle until it can be written: %v", c.attemptMarker, err)
+	}
 }
 
 // cycle carries the per-run state the steps share.

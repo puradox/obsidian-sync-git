@@ -21,6 +21,8 @@
 #   9. a .gitmodules entry without a gitlink is ignored but its edits still commit
 #  10. a folder of existing notes converted to a submodule keeps its notes
 #  11. a submodule removed upstream is detached, its notes kept as plain files
+#  12. adaptive polling: a tick cycles only when the floor has elapsed, origin
+#      moved, or --now was passed
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -96,7 +98,8 @@ done
 
 # --- the bridge -------------------------------------------------------------
 export REPO_DIR="$T/bridge" VAULT_DIR="$T/bridge/vault"
-export SUCCESS_MARKER="$T/last-success" BRIDGE_LOCKFILE="$T/lock"
+export SUCCESS_MARKER="$T/last-success" ATTEMPT_MARKER="$T/last-attempt"
+export BRIDGE_LOCKFILE="$T/lock"
 export OB_SYNC_TIMEOUT=5
 git init -q -b main "$REPO_DIR"
 git -C "$REPO_DIR" remote add origin "$OUTER_REMOTE"
@@ -353,6 +356,56 @@ check "folder is a git checkout again"           test -e "$VAULT_DIR/Legacy/.git
 check "outer gitlink follows the folder's HEAD" \
   test "$(outer_ptr vault/Legacy)" = "$(git -C "$VAULT_DIR/Legacy" rev-parse HEAD)"
 check "outer tree clean after the cycle"         outer_clean
+
+# 12 --------------------------------------------------------------------------
+# Adaptive polling. SYNC_INTERVAL is the floor between full cycles; between
+# them a tick is just a `git ls-remote`. The decision table itself is unit
+# tested (cmd/bridge/schedule_test.go) — what is checked here is that a real
+# tick against a real remote does, or does not, pay for a cycle.
+export SYNC_INTERVAL=3600
+rm -f "$ATTEMPT_MARKER"
+
+ticks=0
+tick() {   # a bare tick: unlike run_cycle, it does not assume a cycle happened
+  local rc=0
+  ticks=$((ticks + 1))
+  : > "$OB_LOG"
+  "$BRIDGE_BIN" "$@" > "$T/cycle.log" 2>&1 || rc=$?
+  [ -z "${KEEP_TMP:-}" ] || cp "$T/cycle.log" "$T/tick-$ticks.log"
+  return "$rc"
+}
+cycled()     { logged "starting cycle"; }
+not_cycled() { ! logged "starting cycle" && [ ! -s "$OB_LOG" ]; }
+
+printf '\n== adaptive polling\n'
+
+check "tick on a fresh volume exits 0"                 tick
+check "first tick on a fresh volume cycles" cycled
+
+check "quiet tick exits 0"                             tick
+check "nothing new and not due: no cycle, no ob sync"  not_cycled
+check "quiet tick stays out of the log"                test ! -s "$T/cycle.log"
+
+check "--now exits 0"                                  tick --now
+check "--now cycles anyway"                            cycled
+check "--now says why"                                 logged "forced with --now"
+
+# A merged pull request: a commit reaches origin/main without the bridge.
+( cd "$T/collab-outer" && git pull -q --rebase origin main \
+  && echo "merged upstream" > vault/pr.md && git add -A \
+  && git commit -qm "PR: pr.md" && git push -q origin main )
+
+check "tick after an upstream push exits 0"            tick
+check "origin/main moved: cycles without waiting for the floor" cycled
+check "the reason is named"                            logged "origin/main moved"
+check "the merged note reached the vault"              test -f "$VAULT_DIR/pr.md"
+
+check "tick after catching up exits 0"                 tick
+check "caught up again: no further cycle"              not_cycled
+
+if tick --bogus; then fail "an unknown flag is rejected"; else pass "an unknown flag is rejected"; fi
+check "the unknown flag is named"                      logged "unknown argument"
+check "the unknown flag did not cycle"                 not_cycled
 
 # (The name-transform / URL-parsing unit checks live in cmd/bridge/*_test.go.)
 
