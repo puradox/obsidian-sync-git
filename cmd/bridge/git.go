@@ -2,10 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // repo is one git working tree — the outer repo, or a submodule checkout. All
@@ -146,6 +149,78 @@ func (r *repo) fetchBranch(branch, ctx string) bool {
 		logErr("git fetch failed (network?)%s — deferring to next tick", ctxOn(ctx))
 	}
 	return false
+}
+
+// remoteHead asks origin for the SHA at refs/heads/<branch> without
+// transferring a single object — one ssh handshake. It carries its own
+// deadline because it runs on the adaptive-polling tick: an unbounded probe
+// that stalled would hold the cycle lock for as long as the connection did.
+//
+// Returns "" (and no error) when origin has no such branch — an empty repo
+// waiting for its first push is not a failure. An error means we could not
+// ask, which is different from "nothing has changed" and must not be
+// flattened into it.
+func (r *repo) remoteHead(branch string, timeout time.Duration) (string, error) {
+	ref := "refs/heads/" + branch
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", r.dir, "ls-remote", "origin", ref)
+	cmd.Stdin = nil
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("git ls-remote timed out after %s", timeout)
+		}
+		if detail := lastLine(stderr.String()); detail != "" {
+			return "", fmt.Errorf("git ls-remote failed: %s", detail)
+		}
+		return "", fmt.Errorf("git ls-remote failed: %w", err)
+	}
+	for _, line := range strings.Split(stdout.String(), "\n") {
+		sha, name, ok := strings.Cut(strings.TrimSpace(line), "\t")
+		if ok && name == ref {
+			return sha, nil
+		}
+	}
+	return "", nil
+}
+
+// remoteMoved reports whether origin's <branch> points somewhere our
+// remote-tracking ref does not — i.e. whether a cycle would have anything new
+// to pull.
+//
+// The bridge's OWN push can never make this true: a successful push updates
+// refs/remotes/origin/<branch> to what it pushed, so the next probe compares
+// equal. That is what makes this safe to run on a fast tick with no memory of
+// what we last published — no stored SHA, no filtering pushes by author.
+func (r *repo) remoteMoved(branch string, timeout time.Duration) (bool, error) {
+	remote, err := r.remoteHead(branch, timeout)
+	if err != nil {
+		return false, err
+	}
+	local, ok := r.revParse("refs/remotes/origin/" + branch)
+	if !ok {
+		// Never fetched (a fresh container): anything on origin is new to us,
+		// an empty origin is not.
+		return remote != "", nil
+	}
+	// remote == "" with a local ref means the branch was deleted upstream. A
+	// cycle would not fix that, so it is not a reason to start one.
+	return remote != "" && remote != local, nil
+}
+
+// lastLine is the final non-blank line of s, for quoting a command's own
+// diagnostic in an error without replaying its whole output.
+func lastLine(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if l := strings.TrimSpace(lines[i]); l != "" {
+			return l
+		}
+	}
+	return ""
 }
 
 // commitWorkingTree commits whatever is in the working tree ("vault wins"

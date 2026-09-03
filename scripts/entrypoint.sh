@@ -250,10 +250,14 @@ setup_sync() {
 }
 
 write_crontab() {
-  # Cap every scheduled cycle (not just the RUN_ON_START one) so a hung step can
+  # TICK_SCHEDULE, not CRON_SCHEDULE: with adaptive polling on, ticks are far
+  # more frequent than syncs and most of them only run a `git ls-remote` probe
+  # and exit (see cmd/bridge/schedule.go). The bridge decides which is which.
+  #
+  # Cap every scheduled tick (not just the RUN_ON_START one) so a hung step can
   # never wedge the schedule. --kill-after force-kills a cycle that ignores TERM.
   printf '%s timeout --kill-after=30 %s /usr/local/bin/bridge\n' \
-    "$CRON_SCHEDULE" "$BRIDGE_CYCLE_TIMEOUT" > "$CRONTAB_FILE"
+    "$TICK_SCHEDULE" "$BRIDGE_CYCLE_TIMEOUT" > "$CRONTAB_FILE"
 }
 
 # =============================== main =====================================
@@ -300,6 +304,64 @@ esac
 if [[ ! "$CRON_SCHEDULE" =~ ^\*/[0-9]+[[:space:]] ]] && [ -z "${HEALTH_STALE_SECONDS:-}" ]; then
   log "WARNING: CRON_SCHEDULE '$CRON_SCHEDULE' is not '*/N ...', so the healthcheck cannot derive a staleness threshold and falls back to 1800s — set HEALTH_STALE_SECONDS to ~2x your interval to avoid false-unhealthy"
 fi
+
+# Adaptive polling. A full cycle is expensive — two `ob sync` round trips, a
+# fetch, an LLM commit message — so it stays on CRON_SCHEDULE, which keeps its
+# documented meaning: how often the vault and GitHub are fully reconciled. What
+# changes is that BETWEEN those cycles supercronic ticks every POLL_INTERVAL
+# minutes and the bridge runs a single `git ls-remote` (one ssh handshake, no
+# objects transferred), cycling early only when origin/main has actually moved.
+# A merged pull request reaches your devices within a minute instead of waiting
+# out the schedule. Nothing here can make the bridge sync LESS often than
+# CRON_SCHEDULE.
+#
+# This only helps the GitHub -> vault direction. Obsidian Sync has no way to
+# tell us a device edited a note, so there is nothing to probe on that side:
+# `ob sync` IS the probe, and it stays on the floor interval.
+#
+# The bridge needs the floor as seconds (SYNC_INTERVAL), which can only be
+# derived from a "*/N * * * *" CRON_SCHEDULE — the same shape healthcheck.sh
+# needs — so an unusual schedule keeps the old every-tick-is-a-cycle behaviour
+# unless SYNC_INTERVAL is set explicitly.
+TICK_SCHEDULE="$CRON_SCHEDULE"
+POLL_INTERVAL="${POLL_INTERVAL:-1}"
+case "$POLL_INTERVAL" in
+  ''|*[!0-9]*) die "POLL_INTERVAL must be an integer number of minutes (0 disables it), got: '$POLL_INTERVAL'" ;;
+esac
+POLL_INTERVAL="$(( 10#$POLL_INTERVAL ))"
+[ "$POLL_INTERVAL" -le 59 ] \
+  || die "POLL_INTERVAL must be 59 or less — it becomes a '*/N * * * *' crontab line, got: '$POLL_INTERVAL'"
+
+# derived: SYNC_INTERVAL came from CRON_SCHEDULE rather than from the user, so
+# a zero means "couldn't work it out" (worth a warning) rather than "off".
+sync_interval_derived=false
+if [ -n "${SYNC_INTERVAL:-}" ]; then
+  case "$SYNC_INTERVAL" in
+    *[!0-9]*) die "SYNC_INTERVAL must be an integer number of seconds, got: '$SYNC_INTERVAL'" ;;
+  esac
+  SYNC_INTERVAL="$(( 10#$SYNC_INTERVAL ))"
+elif [[ "$CRON_SCHEDULE" =~ ^\*/([0-9]+)[[:space:]] ]]; then
+  SYNC_INTERVAL="$(( BASH_REMATCH[1] * 60 ))"
+  sync_interval_derived=true
+else
+  SYNC_INTERVAL=0
+  sync_interval_derived=true
+fi
+
+if [ "$POLL_INTERVAL" -eq 0 ] || { [ "$SYNC_INTERVAL" -eq 0 ] && [ "$sync_interval_derived" = false ]; }; then
+  SYNC_INTERVAL=0
+  log "adaptive polling off — every tick of '$CRON_SCHEDULE' runs a full sync"
+elif [ "$SYNC_INTERVAL" -eq 0 ]; then
+  log "WARNING: adaptive polling needs the sync interval in seconds and CRON_SCHEDULE '$CRON_SCHEDULE' is not '*/N ...' — set SYNC_INTERVAL to that schedule's length in seconds to turn it on. Every tick runs a full sync for now."
+elif [ "$(( POLL_INTERVAL * 60 ))" -ge "$SYNC_INTERVAL" ]; then
+  log "adaptive polling off: POLL_INTERVAL (${POLL_INTERVAL}m) is not shorter than the sync interval ($(( SYNC_INTERVAL / 60 ))m), so polling could not make anything arrive sooner"
+  SYNC_INTERVAL=0
+else
+  TICK_SCHEDULE="*/$POLL_INTERVAL * * * *"
+  log "adaptive polling on: checking GitHub for new commits every ${POLL_INTERVAL}m, full sync at least every $(( SYNC_INTERVAL / 60 ))m"
+fi
+# Read by cmd/bridge; 0 means "every tick is a full cycle".
+export SYNC_INTERVAL
 
 # Optional heartbeat to an external uptime monitor (Uptime Kuma's "Push"
 # monitor and anything shaped like it). Validated here so a typo is a startup
@@ -376,11 +438,14 @@ init_git_repo
 setup_sync
 
 if [ "$RUN_ON_START" = "true" ]; then
+  # --now: a restart that lands inside the floor interval must still sync, or
+  # RUN_ON_START would silently stop meaning "sync once when the container
+  # starts" as soon as adaptive polling was on.
   log "running an initial bridge cycle (RUN_ON_START=true; ${BRIDGE_CYCLE_TIMEOUT}s cap)"
-  timeout --kill-after=30 "$BRIDGE_CYCLE_TIMEOUT" /usr/local/bin/bridge \
+  timeout --kill-after=30 "$BRIDGE_CYCLE_TIMEOUT" /usr/local/bin/bridge --now \
     || log "initial cycle did not complete cleanly; supercronic will retry on schedule"
 fi
 
 write_crontab
-log "starting supercronic on schedule: $CRON_SCHEDULE"
+log "starting supercronic on schedule: $TICK_SCHEDULE"
 exec supercronic -passthrough-logs "$CRONTAB_FILE"
