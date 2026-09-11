@@ -17,13 +17,14 @@ func TestDecideCycle(t *testing.T) {
 	ago := func(d time.Duration) time.Time { return now.Add(-d) }
 
 	// probe results, and a sentinel for "the probe must not be reached".
-	moved := func() (bool, error) { return true, nil }
-	unmoved := func() (bool, error) { return false, nil }
-	broken := func() (bool, error) { return false, errors.New("ssh: connect timed out") }
-	never := func() (bool, error) {
+	moved := func() (cycleTrigger, error) { return triggerRemote, nil }
+	subMoved := func() (cycleTrigger, error) { return "submodule Shared: origin/main moved", nil }
+	unmoved := func() (cycleTrigger, error) { return triggerNone, nil }
+	broken := func() (cycleTrigger, error) { return triggerNone, errors.New("ssh: connect timed out") }
+	never := func() (cycleTrigger, error) {
 		t.Helper()
 		t.Error("probe called although the decision was already settled without it")
-		return false, nil
+		return triggerNone, nil
 	}
 
 	cases := []struct {
@@ -32,7 +33,7 @@ func TestDecideCycle(t *testing.T) {
 		lastSuccess time.Time
 		floor       time.Duration
 		force       bool
-		probe       func() (bool, error)
+		probe       func() (cycleTrigger, error)
 		want        cycleTrigger
 	}{
 		{
@@ -58,6 +59,14 @@ func TestDecideCycle(t *testing.T) {
 			name:        "mid-interval, origin/main moved",
 			lastAttempt: ago(time.Minute), lastSuccess: ago(50 * time.Second),
 			floor: floor, probe: moved, want: triggerRemote,
+		},
+		{
+			// The probe's answer names what moved, and that is what gets
+			// logged: a merge into a shared folder's repo must not read as
+			// a move of the vault's own origin.
+			name:        "mid-interval, a submodule's remote moved",
+			lastAttempt: ago(time.Minute), lastSuccess: ago(50 * time.Second),
+			floor: floor, probe: subMoved, want: "submodule Shared: origin/main moved",
 		},
 		{
 			name:        "mid-interval, nothing new: the cheap common case",
@@ -93,6 +102,83 @@ func TestDecideCycle(t *testing.T) {
 				t.Errorf("decideCycle = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// The probe reaches into every shared folder: a pull request merged into a
+// submodule's own repository must start a cycle as promptly as one merged
+// into the vault's — that repository is where such a merge lands, and the
+// vault's origin/main never moves for it.
+func TestProbeRemotesSubmodule(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// The vault's repository and the shared folder's, each with its own origin.
+	vaultBare := filepath.Join(root, "vault.git")
+	sharedBare := filepath.Join(root, "shared.git")
+	git(t, root, "init", "-q", "--bare", "-b", "main", vaultBare)
+	git(t, root, "init", "-q", "--bare", "-b", "main", sharedBare)
+
+	// Seed the shared repository so the submodule has a commit to point at.
+	// This clone later stands in for a merged pull request there.
+	shared := filepath.Join(root, "shared")
+	git(t, root, "clone", "-q", sharedBare, shared)
+	commitFile(t, shared, "shared.md", "v1\n")
+	git(t, shared, "push", "-q", "origin", "HEAD:main")
+
+	// The bridge's checkout of the vault, with the folder shared the way the
+	// README says: added as a submodule and merged to main. A local path is a
+	// remote that needs no key, so the submodule is reachable without any.
+	work := filepath.Join(root, "work")
+	git(t, root, "clone", "-q", vaultBare, work)
+	git(t, work, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sharedBare, "Shared")
+	git(t, work, "commit", "-q", "-m", "share a folder")
+	git(t, work, "push", "-q", "origin", "HEAD:main")
+
+	cfg := config{repoDir: work, vaultDir: work, home: home}
+	outer := &repo{dir: work}
+	probe := func() cycleTrigger {
+		t.Helper()
+		got, err := probeRemotes(cfg, outer)
+		if err != nil {
+			t.Fatalf("probeRemotes: %v", err)
+		}
+		return got
+	}
+
+	if got := probe(); got != triggerNone {
+		t.Fatalf("nothing merged anywhere: probe = %q, want none", got)
+	}
+
+	// A pull request merged into the shared repository: a commit that appears
+	// on its origin without the bridge doing it, and without the vault's
+	// origin/main moving at all.
+	commitFile(t, shared, "shared.md", "v2\n")
+	git(t, shared, "push", "-q", "origin", "HEAD:main")
+	if got, want := probe(), cycleTrigger("submodule Shared: origin/main moved"); got != want {
+		t.Fatalf("after a merge into the shared repo: probe = %q, want %q", got, want)
+	}
+
+	// The submodule's fetch — what its cycle does — is what settles it.
+	sub := &repo{dir: filepath.Join(work, "Shared")}
+	if !sub.fetchBranch("main", "") {
+		t.Fatal("fetchBranch in the submodule failed")
+	}
+	if got := probe(); got != triggerNone {
+		t.Fatalf("after the submodule fetched: probe = %q, want none", got)
+	}
+
+	// The vault's own origin is still asked first, and still answers for
+	// itself.
+	other := filepath.Join(root, "other")
+	git(t, root, "clone", "-q", vaultBare, other)
+	commitFile(t, other, "note.md", "hello\n")
+	git(t, other, "push", "-q", "origin", "HEAD:main")
+	if got := probe(); got != triggerRemote {
+		t.Fatalf("after a merge into the vault repo: probe = %q, want %q", got, triggerRemote)
 	}
 }
 

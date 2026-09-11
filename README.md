@@ -223,7 +223,7 @@ Everything is configured in `docker-compose.yml` (step 4).
 | `GIT_DEPLOY_KEY_FILE` | ✅ | — | Path of the mounted deploy key (`/keys/deploy_key` in the example). |
 | `OBSIDIAN_VAULT_PASSWORD` | E2EE vaults only | — | The vault's encryption password. Ignored for normal vaults. |
 | `CRON_SCHEDULE` | | `*/15 * * * *` | How often to do a full sync, in [cron syntax](https://crontab.guru/) — the default means every 15 minutes. Merged pull requests normally arrive sooner than this; see `POLL_INTERVAL`. |
-| `POLL_INTERVAL` | | `1` | Minutes between checks for new commits on GitHub, so a merged pull request doesn't wait out `CRON_SCHEDULE` ([details](#how-syncing-works)). A check is one lightweight request that transfers nothing; only an actual change starts a sync. `0` turns it off. |
+| `POLL_INTERVAL` | | `1` | Minutes between checks for new commits on GitHub, so a merged pull request doesn't wait out `CRON_SCHEDULE` ([details](#how-syncing-works)). A check is one lightweight request per repository — your vault's, then each shared folder's — that transfers nothing; only an actual change starts a sync. `0` turns it off. |
 | `SYNC_INTERVAL` | | derived from `CRON_SCHEDULE` | Length of the full-sync interval in seconds. Only needed if `CRON_SCHEDULE` isn't every-N-minutes — without it, `POLL_INTERVAL` can't be used. |
 | `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` | | `Obsidian Bridge` / `obsidian-bridge@localhost` | Name and email shown on the commits. |
 | `VAULT_SUBDIR` | | — (vault = repo root) | Keep the vault in a subfolder of the repository ([details](#keeping-the-vault-in-a-subfolder-of-the-repo)). Fixed once the bridge has run. |
@@ -490,6 +490,11 @@ Good to know:
   your main repository never points at a commit the folder's repository
   doesn't have. A submodule problem (network, a clash it can't resolve) is
   reported like any other failed cycle, but the rest of the vault still syncs.
+- **Merges arrive within a minute here too.** A pull request merged into the
+  folder's repository is noticed by the same once-a-minute check as one merged
+  into yours ([details](#how-syncing-works)), and starts a cycle straight
+  away. A folder the bridge can't reach (no key, or an `https://` URL) is left
+  to the schedule, as its cycle can't pull it either.
 - **Your vault still wins.** Your collaborator's changes are pulled into the
   folder on every cycle; if one clashes with a note you edited, your note wins
   and an `ALERT` names the file, exactly as for pull requests. If the folder
@@ -551,12 +556,16 @@ Every 15 minutes (or your `CRON_SCHEDULE`) the bridge runs one cycle:
 5. Send the merged changes back out to your devices (Obsidian Sync).
 
 **Merged pull requests don't wait for the schedule.** Once a minute the bridge
-asks GitHub whether anything new has landed on `main`. That question is a single
-lightweight request that transfers no files, so it's cheap enough to ask
-often — and if the answer is no, which it usually is, the bridge does nothing at
-all. If the answer is yes, it runs the cycle above straight away, so a merge
-normally reaches your devices within a minute. `POLL_INTERVAL` changes how often
-it asks; `0` goes back to syncing on the schedule only.
+asks GitHub whether anything new has landed on `main` — in your repository, and
+in the repository of every [shared folder](#sharing-a-folder-as-a-git-submodule)
+it can reach. Each question is a single lightweight request that transfers no
+files, so it's cheap enough to ask often — and if the answer is no, which it
+usually is, the bridge does nothing at all. If the answer is yes, it runs the
+cycle above straight away, so a merge normally reaches your devices within a
+minute, and the log says which repository it was for (`starting cycle
+(origin/main moved)`, or `starting cycle (submodule vault/Cove QMS: origin/main
+moved)`). `POLL_INTERVAL` changes how often it asks; `0` goes back to syncing on
+the schedule only.
 
 **Note changes travel on the schedule, and can't be sped up the same way.**
 There's no equivalent cheap question to ask about your devices: Obsidian Sync

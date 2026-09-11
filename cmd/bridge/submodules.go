@@ -211,6 +211,13 @@ func (s *submodule) canReachRemote(cfg config) bool {
 	return needsNoKey(s.url)
 }
 
+// probeable: a tick may ask this submodule's remote for new commits — its
+// checkout exists (a cycle has materialized it) and the remote can be reached,
+// so a cycle started on the answer would actually fetch it.
+func (s *submodule) probeable(cfg config) bool {
+	return exists(filepath.Join(s.repo.dir, ".git")) && s.canReachRemote(cfg)
+}
+
 // routable: the submodule has a key AND an ssh URL to route it to.
 func (s *submodule) routable(cfg config) (sshURL, bool) {
 	if !s.hasKey(cfg) {
