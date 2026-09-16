@@ -161,10 +161,18 @@ func (r *repo) fetchBranch(branch, ctx string) bool {
 // ask, which is different from "nothing has changed" and must not be
 // flattened into it.
 func (r *repo) remoteHead(branch string, timeout time.Duration) (string, error) {
+	return r.remoteHeadAt("origin", branch, timeout)
+}
+
+// remoteHeadAt is remoteHead against any remote: a name, or a URL. A URL is
+// how a submodule is probed — its routed (per-key) URL is passed outright
+// rather than read back from its origin, which the cycle only (re)writes when
+// it runs, so the probe asks the right place even before the first cycle has.
+func (r *repo) remoteHeadAt(remote, branch string, timeout time.Duration) (string, error) {
 	ref := "refs/heads/" + branch
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "-C", r.dir, "ls-remote", "origin", ref)
+	cmd := exec.CommandContext(ctx, "git", "-C", r.dir, "ls-remote", remote, ref)
 	cmd.Stdin = nil
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -196,7 +204,15 @@ func (r *repo) remoteHead(branch string, timeout time.Duration) (string, error) 
 // equal. That is what makes this safe to run on a fast tick with no memory of
 // what we last published — no stored SHA, no filtering pushes by author.
 func (r *repo) remoteMoved(branch string, timeout time.Duration) (bool, error) {
-	remote, err := r.remoteHead(branch, timeout)
+	return r.remoteMovedAt("origin", branch, timeout)
+}
+
+// remoteMovedAt is remoteMoved asking <remote> (a name or a URL — see
+// remoteHeadAt). The comparison is still against refs/remotes/origin/<branch>:
+// that is the ref fetchBranch and pushBranch keep current, whatever address
+// the question was put to.
+func (r *repo) remoteMovedAt(remote, branch string, timeout time.Duration) (bool, error) {
+	remoteSHA, err := r.remoteHeadAt(remote, branch, timeout)
 	if err != nil {
 		return false, err
 	}
@@ -204,11 +220,11 @@ func (r *repo) remoteMoved(branch string, timeout time.Duration) (bool, error) {
 	if !ok {
 		// Never fetched (a fresh container): anything on origin is new to us,
 		// an empty origin is not.
-		return remote != "", nil
+		return remoteSHA != "", nil
 	}
-	// remote == "" with a local ref means the branch was deleted upstream. A
-	// cycle would not fix that, so it is not a reason to start one.
-	return remote != "" && remote != local, nil
+	// remoteSHA == "" with a local ref means the branch was deleted upstream.
+	// A cycle would not fix that, so it is not a reason to start one.
+	return remoteSHA != "" && remoteSHA != local, nil
 }
 
 // lastLine is the final non-blank line of s, for quoting a command's own

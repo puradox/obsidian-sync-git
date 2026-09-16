@@ -3,9 +3,9 @@
 //
 // A tick is not necessarily a cycle. With adaptive polling on (SYNC_INTERVAL
 // set — see schedule.go) supercronic ticks every POLL_INTERVAL minutes and
-// most ticks only run a `git ls-remote` probe and exit, so a merged pull
-// request reaches the vault within a minute instead of waiting out
-// CRON_SCHEDULE. A skipped tick reports nothing to the uptime monitor: it is
+// most ticks only run a `git ls-remote` probe per remote (the vault's, then
+// each submodule's) and exit, so a merged pull request reaches the vault
+// within a minute instead of waiting out CRON_SCHEDULE. A skipped tick reports nothing to the uptime monitor: it is
 // not a cycle, and the heartbeat's cadence stays keyed to CRON_SCHEDULE.
 //
 // The ENTIRE cycle runs under a non-blocking flock on a container-local
@@ -180,13 +180,14 @@ func run() (rc, bool) {
 		return rcRetry, true
 	}
 
-	// Adaptive polling: on most ticks the only work is one ls-remote, and the
-	// answer is "nothing new". Decided under the lock so a probe is never paid
-	// for a tick that a running cycle would have skipped anyway.
+	// Adaptive polling: on most ticks the only work is one ls-remote per
+	// remote, and the answer is "nothing new". Decided under the lock so a
+	// probe is never paid for a tick that a running cycle would have skipped
+	// anyway.
 	outer := &repo{dir: cfg.repoDir}
 	trigger := decideCycle(time.Now(), markerTime(cfg.attemptMarker), markerTime(cfg.successMarker),
-		cfg.syncInterval, force, func() (bool, error) {
-			return outer.remoteMoved("main", probeTimeout)
+		cfg.syncInterval, force, func() (cycleTrigger, error) {
+			return probeRemotes(cfg, outer)
 		})
 	if trigger == triggerNone {
 		// Deliberately silent: this is the common case, and at a one-minute
